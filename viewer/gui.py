@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from viewer.time_series import TimeSeriesViewer
 from viewer.utils import (
     frame_to_pixmap,
     find_md_mff_videos,
@@ -244,6 +245,13 @@ class VideoFrameViewer(QMainWindow):
         layout.addWidget(self.frame_scroll)
         layout.addWidget(self.frame_info_label)
 
+        time_series_group = QGroupBox("Time Series")
+        time_series_layout = QVBoxLayout()
+        self.time_series_viewer = TimeSeriesViewer()
+        time_series_layout.addWidget(self.time_series_viewer)
+        time_series_group.setLayout(time_series_layout)
+        layout.addWidget(time_series_group)
+
         return container
 
     def _build_control_panel(self) -> QGroupBox:
@@ -371,11 +379,13 @@ class VideoFrameViewer(QMainWindow):
         if not self.video_handler.load(video_path):
             self._set_status("Unable to open the selected video.")
             self._update_navigation_state(False)
+            self.time_series_viewer.load_for_video(None)
             return
 
         has_frames = self.video_handler.frame_count > 0
         self.current_frame_index = 0
         self._update_navigation_state(has_frames)
+        self.time_series_viewer.load_for_video(video_path)
 
         if has_frames:
             self._goto_frame(0, show_status=False)
@@ -465,6 +475,7 @@ class VideoFrameViewer(QMainWindow):
         self._display_frame(frame)
         self._update_frame_label()
         self._update_previews()
+        self.time_series_viewer.update_cursor_time(self._current_time_seconds())
         if show_status:
             self._set_status(
                 f"Displaying frame {clamped_index} of {self.video_handler.frame_count - 1} (0-based)."
@@ -499,6 +510,12 @@ class VideoFrameViewer(QMainWindow):
         current_seconds = self.current_frame_index / fps
         total_seconds = self.video_handler.frame_count / fps
         return f"Seconds: {current_seconds:.2f} / {total_seconds:.2f}"
+
+    def _current_time_seconds(self) -> float:
+        fps = self.video_handler.fps
+        if fps <= 0:
+            return 0.0
+        return self.current_frame_index / fps
 
     def _update_previews(self) -> None:
         if self.video_handler.frame_count <= 0:
