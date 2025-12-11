@@ -20,11 +20,15 @@ from PyQt5.QtWidgets import (
 )
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
-DEFAULT_VISIBLE_CHANNELS = {
-    "EOG-EEG-eog-vert_left",
-    "EOG-EEG-eog-vert_right",
-    "EAR_avg_ear",
-}
+PRIMARY_CHANNEL = "EEG-E8"
+DEFAULT_VISIBLE_CHANNELS = {PRIMARY_CHANNEL}
+CHANNEL_PALETTE = [
+    "#d32f2f",  # primary red
+    "#c62828",
+    "#ef5350",
+    "#b71c1c",
+    "#f44336",
+]
 
 
 def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_ROOT) -> Path:
@@ -77,7 +81,8 @@ class TimeSeriesViewer(QWidget):
         self._times: Optional[np.ndarray] = None
         self._selected_channels: Set[str] = set()
         self._last_cursor_time: float = 0.0
-        self.view_span_seconds: float = 10.0
+        self.default_view_span_seconds: float = 5.0
+        self.view_span_seconds: float = self.default_view_span_seconds
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
 
@@ -123,6 +128,10 @@ class TimeSeriesViewer(QWidget):
         layout.addWidget(self.channel_list)
         layout.addWidget(self.plot_widget)
         layout.addWidget(self.status_label)
+        layout.setStretch(0, 0)
+        layout.setStretch(1, 0)
+        layout.setStretch(2, 1)
+        layout.setStretch(3, 0)
 
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""
@@ -194,8 +203,11 @@ class TimeSeriesViewer(QWidget):
         offsets = np.arange(data.shape[0]) * spacing
 
         self.plot_widget.enableAutoRange()
-        for idx, channel in enumerate(data):
-            curve = self.plot_widget.plot(times, channel + offsets[idx], pen=pg.mkPen(width=1))
+        channel_names = [self.raw.ch_names[index] for index in picks]
+        for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
+            curve = self.plot_widget.plot(
+                times, channel + offsets[idx], pen=self._pen_for_channel(channel_name, idx)
+            )
             curve.setDownsampling(auto=True, method="peak")
             self._plotted_curves.append(curve)
 
@@ -223,11 +235,6 @@ class TimeSeriesViewer(QWidget):
                 defaults_present.add(name)
             item.setCheckState(Qt.Checked if is_default else Qt.Unchecked)
             self.channel_list.addItem(item)
-
-        if not defaults_present and self.raw.ch_names:
-            first_item = self.channel_list.item(0)
-            first_item.setCheckState(Qt.Checked)
-            defaults_present.add(first_item.text())
 
         self.channel_list.blockSignals(False)
         self.show_all_checkbox.blockSignals(False)
@@ -279,7 +286,7 @@ class TimeSeriesViewer(QWidget):
         self._ensure_view_range(self._last_cursor_time)
 
     def _reset_zoom(self) -> None:
-        self.view_span_seconds = min(10.0, self._max_span_seconds())
+        self.view_span_seconds = min(self.default_view_span_seconds, self._max_span_seconds())
         self.zoom_label.setText(self._zoom_label_text())
         self._ensure_view_range(self._last_cursor_time)
 
@@ -324,3 +331,10 @@ class TimeSeriesViewer(QWidget):
         self.plot_widget.enableAutoRange()
         if hide_cursor:
             self.cursor_line.hide()
+
+    def _pen_for_channel(self, channel_name: str, index: int) -> pg.Pen:
+        if channel_name == PRIMARY_CHANNEL:
+            return pg.mkPen(CHANNEL_PALETTE[0], width=1.5)
+
+        palette_index = (index + 1) % len(CHANNEL_PALETTE)
+        return pg.mkPen(CHANNEL_PALETTE[palette_index], width=1)
