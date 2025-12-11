@@ -114,7 +114,7 @@ class VideoFrameViewer(QMainWindow):
     JUMP_STEP = 10
     TIME_BASE_FPS = 30
     PREVIEW_RANGE = 5
-    PREVIEW_SIZE = QSize(120, 68)
+    PREVIEW_SIZE = QSize(96, 54)
 
     def __init__(self) -> None:
         super().__init__()
@@ -151,18 +151,25 @@ class VideoFrameViewer(QMainWindow):
         upper_splitter = QSplitter(Qt.Horizontal)
         upper_splitter.setChildrenCollapsible(False)
 
+        controls_and_list = QWidget()
+        controls_and_list_layout = QVBoxLayout()
+        controls_and_list_layout.setContentsMargins(0, 0, 0, 0)
+        controls_and_list_layout.setSpacing(6)
+        controls_and_list.setLayout(controls_and_list_layout)
+
         video_list_panel = self._build_video_list_panel()
+        control_group = self._build_control_panel()
+        controls_and_list_layout.addWidget(video_list_panel)
+        controls_and_list_layout.addWidget(control_group)
+
         frame_panel = self._build_frame_panel()
 
-        upper_splitter.addWidget(video_list_panel)
+        upper_splitter.addWidget(controls_and_list)
         upper_splitter.addWidget(frame_panel)
         upper_splitter.setStretchFactor(0, 1)
-        upper_splitter.setStretchFactor(1, 4)
+        upper_splitter.setStretchFactor(1, 5)
 
         top_layout.addWidget(upper_splitter)
-
-        control_group = self._build_control_panel()
-        top_layout.addWidget(control_group)
 
         time_series_group = self._build_time_series_panel()
 
@@ -228,11 +235,11 @@ class VideoFrameViewer(QMainWindow):
 
         self.frame_label = PannableLabel("Scan and select a video to view frames.")
         self.frame_label.setAlignment(Qt.AlignCenter)
-        self.frame_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.frame_label.setMinimumSize(640, 360)
+        self.frame_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.frame_label.setMinimumSize(960, 540)
 
         self.frame_scroll = QScrollArea()
-        self.frame_scroll.setWidgetResizable(False)
+        self.frame_scroll.setWidgetResizable(True)
         self.frame_scroll.setWidget(self.frame_label)
         self.frame_scroll.setAlignment(Qt.AlignCenter)
         self.frame_label.set_scroll_area(self.frame_scroll)
