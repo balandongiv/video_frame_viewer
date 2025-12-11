@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtCore import QEvent, QSize, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -139,6 +139,7 @@ class VideoFrameViewer(QMainWindow):
 
         self._setup_ui()
         self._setup_shortcuts()
+        self.frame_scroll.viewport().installEventFilter(self)
         self._update_navigation_state(False)
         self._initialize_dataset_root()
 
@@ -832,6 +833,19 @@ class VideoFrameViewer(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.video_handler.release()
         super().closeEvent(event)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if (
+            obj is self.frame_scroll.viewport()
+            and event.type() == QEvent.Wheel
+            and event.modifiers() & Qt.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            step = 0.25 if delta > 0 else -0.25
+            self._adjust_zoom(step)
+            return True
+
+        return super().eventFilter(obj, event)
 
 
 def run_app() -> None:

@@ -7,7 +7,7 @@ from typing import List, Optional, Set
 import mne
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -121,6 +121,7 @@ class TimeSeriesViewer(QWidget):
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel("bottom", "Time", units="s")
         self.plot_widget.setLabel("left", "Channels")
+        self.plot_widget.viewport().installEventFilter(self)
 
         self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("r", width=2))
         self.plot_widget.addItem(self.cursor_line)
@@ -346,3 +347,16 @@ class TimeSeriesViewer(QWidget):
 
         palette_index = (index + 1) % len(CHANNEL_PALETTE)
         return pg.mkPen(CHANNEL_PALETTE[palette_index], width=1)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if (
+            obj is self.plot_widget.viewport()
+            and event.type() == QEvent.Wheel
+            and event.modifiers() & Qt.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            multiplier = 0.8 if delta > 0 else 1.25
+            self._adjust_zoom(multiplier)
+            return True
+
+        return super().eventFilter(obj, event)
