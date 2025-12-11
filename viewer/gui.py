@@ -125,6 +125,7 @@ class VideoFrameViewer(QMainWindow):
         self.video_paths: List[Path] = []
         self.current_frame_index: int = 0
         self.shift_value: int = 0
+        self.sync_offset_seconds: int = 0
         self.zoom_factor: float = 1.0
         self.last_frame = None
         self.time_series_viewer = TimeSeriesViewer()
@@ -339,6 +340,14 @@ class VideoFrameViewer(QMainWindow):
         apply_shift_button = QPushButton("Apply Shift")
         apply_shift_button.clicked.connect(self._apply_shift)
 
+        self.sync_offset_input = QLineEdit()
+        self.sync_offset_input.setPlaceholderText(
+            "Sync offset in seconds (integer, can be negative)"
+        )
+        self.sync_offset_input.returnPressed.connect(self._apply_sync_offset)
+        apply_sync_offset_button = QPushButton("Apply Sync Offset")
+        apply_sync_offset_button.clicked.connect(self._apply_sync_offset)
+
         control_layout.addWidget(QLabel("Frame Number:"), 0, 0)
         control_layout.addWidget(self.frame_input, 0, 1)
         control_layout.addWidget(self.search_button, 0, 2)
@@ -350,6 +359,10 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(QLabel("Shift Frame:"), 2, 0)
         control_layout.addWidget(self.shift_input, 2, 1)
         control_layout.addWidget(apply_shift_button, 2, 2)
+
+        control_layout.addWidget(QLabel("Sync Offset (s):"), 3, 0)
+        control_layout.addWidget(self.sync_offset_input, 3, 1)
+        control_layout.addWidget(apply_sync_offset_button, 3, 2)
 
         navigation_layout = QHBoxLayout()
         self.left_button = QPushButton("Left")
@@ -367,7 +380,7 @@ class VideoFrameViewer(QMainWindow):
         navigation_layout.addWidget(self.left_jump_button)
         navigation_layout.addWidget(self.right_jump_button)
 
-        control_layout.addLayout(navigation_layout, 3, 0, 1, 3)
+        control_layout.addLayout(navigation_layout, 4, 0, 1, 3)
 
         zoom_layout = QHBoxLayout()
         self.zoom_out_button = QPushButton("Zoom -")
@@ -383,10 +396,10 @@ class VideoFrameViewer(QMainWindow):
         zoom_layout.addWidget(self.zoom_reset_button)
         zoom_layout.addWidget(self.zoom_label)
 
-        control_layout.addLayout(zoom_layout, 4, 0, 1, 3)
+        control_layout.addLayout(zoom_layout, 5, 0, 1, 3)
 
         self.current_frame_label = QLabel("Current frame: -")
-        control_layout.addWidget(self.current_frame_label, 5, 0, 1, 3)
+        control_layout.addWidget(self.current_frame_label, 6, 0, 1, 3)
 
         return control_group
 
@@ -472,6 +485,23 @@ class VideoFrameViewer(QMainWindow):
         except ValueError:
             self._set_status("Invalid shift value. Please enter an integer.")
 
+    def _apply_sync_offset(self) -> None:
+        offset_text = self.sync_offset_input.text().strip()
+        if not offset_text:
+            self.sync_offset_seconds = 0
+            self._set_status("Sync offset cleared (0s).")
+            self._update_time_series_cursor()
+            return
+
+        try:
+            self.sync_offset_seconds = int(offset_text)
+            self._set_status(
+                f"Sync offset set to {self.sync_offset_seconds} second(s)."
+            )
+            self._update_time_series_cursor()
+        except ValueError:
+            self._set_status("Invalid sync offset. Please enter an integer.")
+
     def _search_frame(self) -> None:
         if not self.video_handler.capture:
             self._set_status("Load a video before searching for frames.")
@@ -538,7 +568,7 @@ class VideoFrameViewer(QMainWindow):
         self._display_frame(frame)
         self._update_frame_label()
         self._update_previews()
-        self.time_series_viewer.update_cursor_time(self._current_time_seconds())
+        self._update_time_series_cursor()
         if show_status:
             self._set_status(
                 f"Displaying frame {clamped_index} of {self.video_handler.frame_count - 1} (0-based)."
@@ -579,6 +609,12 @@ class VideoFrameViewer(QMainWindow):
         if fps <= 0:
             return 0.0
         return self.current_frame_index / fps
+
+    def _synced_time_seconds(self) -> float:
+        return self._current_time_seconds() + self.sync_offset_seconds
+
+    def _update_time_series_cursor(self) -> None:
+        self.time_series_viewer.update_cursor_time(self._synced_time_seconds())
 
     def _update_previews(self) -> None:
         if self.video_handler.frame_count <= 0:
