@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -16,7 +17,9 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -125,12 +128,15 @@ class VideoFrameViewer(QMainWindow):
         self.video_paths: List[Path] = []
         self.current_frame_index: int = 0
         self.shift_value: int = 0
+        self.left_jump_size: int = self.JUMP_STEP
+        self.right_jump_size: int = self.JUMP_STEP
         self.sync_offset_seconds: float = 0.0
         self.zoom_factor: float = 1.0
         self.last_frame = None
         self.time_series_viewer = TimeSeriesViewer()
 
         self._setup_ui()
+        self._setup_shortcuts()
         self._update_navigation_state(False)
         self._initialize_dataset_root()
 
@@ -313,10 +319,44 @@ class VideoFrameViewer(QMainWindow):
         channels_layout.addStretch()
         channels_tab.setLayout(channels_layout)
 
+        navigation_tab = self._build_navigation_tab()
+
         tabs.addTab(videos_tab, "Videos")
         tabs.addTab(channels_tab, "Channels")
+        tabs.addTab(navigation_tab, "Navigation")
 
         return tabs
+
+    def _build_navigation_tab(self) -> QWidget:
+        navigation_tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        jump_group = QGroupBox("Jump Settings")
+        jump_layout = QGridLayout()
+        jump_group.setLayout(jump_layout)
+
+        self.left_jump_input = QSpinBox()
+        self.left_jump_input.setMinimum(1)
+        self.left_jump_input.setMaximum(1_000_000)
+        self.left_jump_input.setValue(self.left_jump_size)
+        self.left_jump_input.valueChanged.connect(self._update_left_jump_size)
+
+        self.right_jump_input = QSpinBox()
+        self.right_jump_input.setMinimum(1)
+        self.right_jump_input.setMaximum(1_000_000)
+        self.right_jump_input.setValue(self.right_jump_size)
+        self.right_jump_input.valueChanged.connect(self._update_right_jump_size)
+
+        jump_layout.addWidget(QLabel("Left Jump (frames):"), 0, 0)
+        jump_layout.addWidget(self.left_jump_input, 0, 1)
+        jump_layout.addWidget(QLabel("Right Jump (frames):"), 1, 0)
+        jump_layout.addWidget(self.right_jump_input, 1, 1)
+
+        layout.addWidget(jump_group)
+        layout.addStretch()
+        navigation_tab.setLayout(layout)
+        return navigation_tab
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
@@ -373,8 +413,8 @@ class VideoFrameViewer(QMainWindow):
 
         self.left_button.clicked.connect(lambda: self._step_frames(-self.SINGLE_STEP))
         self.right_button.clicked.connect(lambda: self._step_frames(self.SINGLE_STEP))
-        self.left_jump_button.clicked.connect(lambda: self._step_frames(-self.JUMP_STEP))
-        self.right_jump_button.clicked.connect(lambda: self._step_frames(self.JUMP_STEP))
+        self.left_jump_button.clicked.connect(self._trigger_left_jump)
+        self.right_jump_button.clicked.connect(self._trigger_right_jump)
 
         navigation_layout.addWidget(self.left_button)
         navigation_layout.addWidget(self.right_button)
@@ -568,6 +608,18 @@ class VideoFrameViewer(QMainWindow):
         target_frame = self.current_frame_index + step
         self._goto_frame(target_frame)
 
+    def _trigger_left_jump(self) -> None:
+        self._step_frames(-self.left_jump_size)
+
+    def _trigger_right_jump(self) -> None:
+        self._step_frames(self.right_jump_size)
+
+    def _update_left_jump_size(self, value: int) -> None:
+        self.left_jump_size = max(1, value)
+
+    def _update_right_jump_size(self, value: int) -> None:
+        self.right_jump_size = max(1, value)
+
     def _goto_frame(self, frame_index: int, show_status: bool = True) -> None:
         if self.video_handler.frame_count <= 0:
             self._set_status("No frames available in this video.")
@@ -701,6 +753,30 @@ class VideoFrameViewer(QMainWindow):
 
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)
+
+    def _setup_shortcuts(self) -> None:
+        left_shortcut = QShortcut(QKeySequence(Qt.Key_Left), self)
+        left_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        left_shortcut.activated.connect(self._handle_left_shortcut)
+
+        right_shortcut = QShortcut(QKeySequence(Qt.Key_Right), self)
+        right_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        right_shortcut.activated.connect(self._handle_right_shortcut)
+
+        self.left_shortcut = left_shortcut
+        self.right_shortcut = right_shortcut
+
+    def _handle_left_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self._trigger_left_jump()
+
+    def _handle_right_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self._trigger_right_jump()
+
+    def _shortcut_allowed(self) -> bool:
+        focus_widget = QApplication.focusWidget()
+        return not isinstance(focus_widget, (QLineEdit, QSpinBox))
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.video_handler.release()
