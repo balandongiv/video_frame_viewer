@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 
 from viewer.utils import (
     frame_to_pixmap,
-    is_md_mff_video,
+    find_md_mff_videos,
     placeholder_pixmap,
     seconds_to_frame_index,
 )
@@ -348,9 +348,7 @@ class VideoFrameViewer(QMainWindow):
             )
             return
 
-        self.video_paths = [
-            path for path in root_path.rglob("*.mov") if is_md_mff_video(path)
-        ]
+        self.video_paths = find_md_mff_videos(root_path)
 
         self.video_list.clear()
         for video_path in sorted(self.video_paths):
