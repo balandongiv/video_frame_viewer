@@ -5,6 +5,7 @@ from typing import List, Optional
 from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtWidgets import (
     QApplication,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -163,9 +164,9 @@ class VideoFrameViewer(QMainWindow):
         directory_group.setLayout(directory_layout)
 
         self.directory_input = QLineEdit()
-        self.directory_input.setReadOnly(True)
+        self.directory_input.setPlaceholderText("Select or enter dataset root")
+        self.directory_input.returnPressed.connect(self._scan_directory)
         browse_button = QPushButton("Browse")
-        browse_button.setEnabled(False)
         scan_button = QPushButton("Rescan")
 
         browse_button.clicked.connect(self._browse_directory)
@@ -324,19 +325,27 @@ class VideoFrameViewer(QMainWindow):
 
     # Directory logic
     def _browse_directory(self) -> None:
-        self._set_status("Dataset root is fixed and cannot be changed.")
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select dataset root", str(self.DATASET_ROOT)
+        )
+        if selected:
+            self.directory_input.setText(selected)
+            self._scan_directory()
 
     def _initialize_dataset_root(self) -> None:
         self.directory_input.setText(str(self.DATASET_ROOT))
         self._scan_directory()
 
     def _scan_directory(self) -> None:
-        root_path = self.DATASET_ROOT
+        root_text = self.directory_input.text().strip()
+        root_path = Path(root_text) if root_text else self.DATASET_ROOT
         self.directory_input.setText(str(root_path))
 
         if not root_path.exists():
             self.video_list.clear()
-            self._set_status(f"Dataset root not found at {root_path}.")
+            self._set_status(
+                f"Dataset root not found at {root_path}. Please choose another folder."
+            )
             return
 
         self.video_paths = [
