@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from viewer.time_series import TimeSeriesViewer
 from viewer.utils import (
     frame_to_pixmap,
     find_md_mff_videos,
@@ -113,7 +114,7 @@ class VideoFrameViewer(QMainWindow):
     JUMP_STEP = 10
     TIME_BASE_FPS = 30
     PREVIEW_RANGE = 5
-    PREVIEW_SIZE = QSize(120, 68)
+    PREVIEW_SIZE = QSize(96, 54)
 
     def __init__(self) -> None:
         super().__init__()
@@ -139,21 +140,45 @@ class VideoFrameViewer(QMainWindow):
 
         self._build_directory_controls(main_layout)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        self._main_splitter = QSplitter(Qt.Vertical)
+        self._main_splitter.setChildrenCollapsible(False)
+
+        top_container = QWidget()
+        top_layout = QVBoxLayout()
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_container.setLayout(top_layout)
+
+        upper_splitter = QSplitter(Qt.Horizontal)
+        upper_splitter.setChildrenCollapsible(False)
+
+        controls_and_list = QWidget()
+        controls_and_list_layout = QVBoxLayout()
+        controls_and_list_layout.setContentsMargins(0, 0, 0, 0)
+        controls_and_list_layout.setSpacing(6)
+        controls_and_list.setLayout(controls_and_list_layout)
 
         video_list_panel = self._build_video_list_panel()
+        control_group = self._build_control_panel()
+        controls_and_list_layout.addWidget(video_list_panel)
+        controls_and_list_layout.addWidget(control_group)
+
         frame_panel = self._build_frame_panel()
 
-        splitter.addWidget(video_list_panel)
-        splitter.addWidget(frame_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        upper_splitter.addWidget(controls_and_list)
+        upper_splitter.addWidget(frame_panel)
+        upper_splitter.setStretchFactor(0, 1)
+        upper_splitter.setStretchFactor(1, 5)
 
-        main_layout.addWidget(splitter)
+        top_layout.addWidget(upper_splitter)
 
-        control_group = self._build_control_panel()
-        main_layout.addWidget(control_group)
+        time_series_group = self._build_time_series_panel()
+
+        self._main_splitter.addWidget(top_container)
+        self._main_splitter.addWidget(time_series_group)
+        self._main_splitter.setStretchFactor(0, 5)
+        self._main_splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(self._main_splitter)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -199,13 +224,41 @@ class VideoFrameViewer(QMainWindow):
 
         layout.addWidget(QLabel("Frame Display"))
 
+        frame_and_preview_splitter = QSplitter(Qt.Horizontal)
+        frame_and_preview_splitter.setChildrenCollapsible(False)
+
+        frame_area = QWidget()
+        frame_area_layout = QVBoxLayout()
+        frame_area_layout.setContentsMargins(0, 0, 0, 0)
+        frame_area_layout.setSpacing(4)
+        frame_area.setLayout(frame_area_layout)
+
+        self.frame_label = PannableLabel("Scan and select a video to view frames.")
+        self.frame_label.setAlignment(Qt.AlignCenter)
+        self.frame_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.frame_label.setMinimumSize(960, 540)
+
+        self.frame_scroll = QScrollArea()
+        self.frame_scroll.setWidgetResizable(True)
+        self.frame_scroll.setWidget(self.frame_label)
+        self.frame_scroll.setAlignment(Qt.AlignCenter)
+        self.frame_label.set_scroll_area(self.frame_scroll)
+
+        self.frame_info_label = QLabel("Frame: -")
+        self.frame_info_label.setAlignment(Qt.AlignCenter)
+
+        frame_area_layout.addWidget(self.frame_scroll)
+        frame_area_layout.addWidget(self.frame_info_label)
+
+        frame_and_preview_splitter.addWidget(frame_area)
+
         self.preview_group = QGroupBox("Surrounding Frames")
-        preview_layout = QHBoxLayout()
+        preview_layout = QVBoxLayout()
         preview_layout.setContentsMargins(6, 6, 6, 6)
         preview_layout.setSpacing(4)
 
         preview_strip = QWidget()
-        preview_strip_layout = QHBoxLayout()
+        preview_strip_layout = QVBoxLayout()
         preview_strip_layout.setContentsMargins(0, 0, 0, 0)
         preview_strip_layout.setSpacing(6)
         preview_strip.setLayout(preview_strip_layout)
@@ -220,31 +273,32 @@ class VideoFrameViewer(QMainWindow):
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(preview_strip)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         preview_layout.addWidget(scroll_area)
         self.preview_group.setLayout(preview_layout)
-        layout.addWidget(self.preview_group)
+        frame_and_preview_splitter.addWidget(self.preview_group)
 
-        self.frame_label = PannableLabel("Scan and select a video to view frames.")
-        self.frame_label.setAlignment(Qt.AlignCenter)
-        self.frame_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.frame_label.setMinimumSize(640, 360)
+        frame_and_preview_splitter.setStretchFactor(0, 5)
+        frame_and_preview_splitter.setStretchFactor(1, 1)
 
-        self.frame_scroll = QScrollArea()
-        self.frame_scroll.setWidgetResizable(False)
-        self.frame_scroll.setWidget(self.frame_label)
-        self.frame_scroll.setAlignment(Qt.AlignCenter)
-        self.frame_label.set_scroll_area(self.frame_scroll)
-
-        self.frame_info_label = QLabel("Frame: -")
-        self.frame_info_label.setAlignment(Qt.AlignCenter)
-
-        layout.addWidget(self.frame_scroll)
-        layout.addWidget(self.frame_info_label)
+        layout.addWidget(frame_and_preview_splitter)
 
         return container
+
+    def _build_time_series_panel(self) -> QWidget:
+        time_series_group = QGroupBox("Time Series")
+        time_series_layout = QVBoxLayout()
+        self.time_series_viewer = TimeSeriesViewer()
+        self.time_series_viewer.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
+        self.time_series_viewer.setMinimumHeight(140)
+        time_series_layout.addWidget(self.time_series_viewer)
+        time_series_group.setLayout(time_series_layout)
+        time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        return time_series_group
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
@@ -371,11 +425,13 @@ class VideoFrameViewer(QMainWindow):
         if not self.video_handler.load(video_path):
             self._set_status("Unable to open the selected video.")
             self._update_navigation_state(False)
+            self.time_series_viewer.load_for_video(None)
             return
 
         has_frames = self.video_handler.frame_count > 0
         self.current_frame_index = 0
         self._update_navigation_state(has_frames)
+        self.time_series_viewer.load_for_video(video_path)
 
         if has_frames:
             self._goto_frame(0, show_status=False)
@@ -465,6 +521,7 @@ class VideoFrameViewer(QMainWindow):
         self._display_frame(frame)
         self._update_frame_label()
         self._update_previews()
+        self.time_series_viewer.update_cursor_time(self._current_time_seconds())
         if show_status:
             self._set_status(
                 f"Displaying frame {clamped_index} of {self.video_handler.frame_count - 1} (0-based)."
@@ -499,6 +556,12 @@ class VideoFrameViewer(QMainWindow):
         current_seconds = self.current_frame_index / fps
         total_seconds = self.video_handler.frame_count / fps
         return f"Seconds: {current_seconds:.2f} / {total_seconds:.2f}"
+
+    def _current_time_seconds(self) -> float:
+        fps = self.video_handler.fps
+        if fps <= 0:
+            return 0.0
+        return self.current_frame_index / fps
 
     def _update_previews(self) -> None:
         if self.video_handler.frame_count <= 0:
