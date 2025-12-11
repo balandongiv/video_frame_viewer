@@ -287,10 +287,12 @@ class TimeSeriesViewer(QWidget):
         self._plot_data()
         self._ensure_view_range(self._last_cursor_time)
 
-    def _adjust_zoom(self, multiplier: float) -> None:
+    def _adjust_zoom(self, multiplier: float, anchor_time: Optional[float] = None) -> None:
         self.view_span_seconds = max(
             self.min_span_seconds, min(self.view_span_seconds * multiplier, self._max_span_seconds())
         )
+        if anchor_time is not None:
+            self._last_cursor_time = max(0.0, anchor_time)
         self.zoom_label.setText(self._zoom_label_text())
         self._ensure_view_range(self._last_cursor_time)
 
@@ -356,7 +358,17 @@ class TimeSeriesViewer(QWidget):
         ):
             delta = event.angleDelta().y()
             multiplier = 0.8 if delta > 0 else 1.25
-            self._adjust_zoom(multiplier)
+            anchor_time = self._time_at_position(event.pos())
+            self._adjust_zoom(multiplier, anchor_time=anchor_time)
             return True
 
         return super().eventFilter(obj, event)
+
+    def _time_at_position(self, pos) -> Optional[float]:
+        view_box = self.plot_widget.getPlotItem().getViewBox()
+        if view_box is None:
+            return None
+
+        scene_pos = self.plot_widget.mapToScene(pos)
+        view_pos = view_box.mapSceneToView(scene_pos)
+        return view_pos.x()

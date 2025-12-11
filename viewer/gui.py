@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import QEvent, QSize, Qt
+from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -734,13 +734,13 @@ class VideoFrameViewer(QMainWindow):
         ]:
             button.setEnabled(enabled)
 
-    def _adjust_zoom(self, delta: float) -> None:
-        self._set_zoom(self.zoom_factor + delta)
+    def _adjust_zoom(self, delta: float, anchor: Optional[QPoint] = None) -> None:
+        self._set_zoom(self.zoom_factor + delta, anchor)
 
     def _reset_zoom(self) -> None:
         self._set_zoom(1.0)
 
-    def _set_zoom(self, zoom: float) -> None:
+    def _set_zoom(self, zoom: float, anchor: Optional[QPoint] = None) -> None:
         pixmap = self.frame_label.pixmap()
         viewport_size = self.frame_scroll.viewport().size()
         h_bar = self.frame_scroll.horizontalScrollBar()
@@ -749,12 +749,16 @@ class VideoFrameViewer(QMainWindow):
         if pixmap:
             current_width = max(1, pixmap.width())
             current_height = max(1, pixmap.height())
-            center_x_ratio = (
-                h_bar.value() + viewport_size.width() / 2
-            ) / current_width
-            center_y_ratio = (
-                v_bar.value() + viewport_size.height() / 2
-            ) / current_height
+            if anchor is not None:
+                center_x_ratio = (h_bar.value() + anchor.x()) / current_width
+                center_y_ratio = (v_bar.value() + anchor.y()) / current_height
+            else:
+                center_x_ratio = (
+                    h_bar.value() + viewport_size.width() / 2
+                ) / current_width
+                center_y_ratio = (
+                    v_bar.value() + viewport_size.height() / 2
+                ) / current_height
             center_x_ratio = max(0.0, min(1.0, center_x_ratio))
             center_y_ratio = max(0.0, min(1.0, center_y_ratio))
         else:
@@ -842,7 +846,7 @@ class VideoFrameViewer(QMainWindow):
         ):
             delta = event.angleDelta().y()
             step = 0.25 if delta > 0 else -0.25
-            self._adjust_zoom(step)
+            self._adjust_zoom(step, anchor=event.pos())
             return True
 
         return super().eventFilter(obj, event)
