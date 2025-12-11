@@ -337,6 +337,7 @@ class VideoFrameViewer(QMainWindow):
 
         self.shift_input = QLineEdit()
         self.shift_input.setPlaceholderText("Shift frame (can be negative)")
+        self.shift_input.returnPressed.connect(self._apply_shift)
         apply_shift_button = QPushButton("Apply Shift")
         apply_shift_button.clicked.connect(self._apply_shift)
 
@@ -476,21 +477,33 @@ class VideoFrameViewer(QMainWindow):
         shift_text = self.shift_input.text().strip()
         if not shift_text:
             self.shift_value = 0
+            self.sync_offset_seconds = 0.0
+            self.sync_offset_input.setText("")
             self._set_status("Shift cleared (0).")
+            self._update_time_series_cursor()
             self._update_frame_label()
             return
 
         try:
             self.shift_value = int(shift_text)
-            self._set_status(f"Shift set to {self.shift_value}.")
-            self._update_frame_label()
         except ValueError:
             self._set_status("Invalid shift value. Please enter an integer.")
+            return
+
+        self.sync_offset_seconds = self.shift_value / self.TIME_BASE_FPS
+        self.sync_offset_input.setText(f"{self.sync_offset_seconds:.3f}")
+        self._set_status(
+            f"Shift set to {self.shift_value} frame(s) ({self.sync_offset_seconds:+.3f}s)."
+        )
+        self._update_time_series_cursor()
+        self._update_frame_label()
 
     def _apply_sync_offset(self) -> None:
         offset_text = self.sync_offset_input.text().strip()
         if not offset_text:
             self.sync_offset_seconds = 0.0
+            self.shift_value = 0
+            self.shift_input.setText("")
             self._set_status("Sync offset cleared (0s).")
             self._update_time_series_cursor()
             self._update_frame_label()
@@ -498,13 +511,17 @@ class VideoFrameViewer(QMainWindow):
 
         try:
             self.sync_offset_seconds = float(offset_text)
-            self._set_status(
-                f"Sync offset set to {self.sync_offset_seconds:.2f} second(s)."
-            )
-            self._update_time_series_cursor()
-            self._update_frame_label()
         except ValueError:
             self._set_status("Invalid sync offset. Please enter a number.")
+            return
+
+        self.shift_value = int(round(self.sync_offset_seconds * self.TIME_BASE_FPS))
+        self.shift_input.setText(str(self.shift_value))
+        self._set_status(
+            f"Sync offset set to {self.sync_offset_seconds:+.3f} second(s) ({self.shift_value:+d} frame(s))."
+        )
+        self._update_time_series_cursor()
+        self._update_frame_label()
 
     def _search_frame(self) -> None:
         if not self.video_handler.capture:
@@ -522,8 +539,7 @@ class VideoFrameViewer(QMainWindow):
             self._set_status("Invalid frame number. Please enter an integer.")
             return
 
-        effective_frame = requested_frame + self.shift_value
-        self._goto_frame(effective_frame)
+        self._goto_frame(requested_frame)
 
     def _search_time(self) -> None:
         if not self.video_handler.capture:
@@ -542,8 +558,7 @@ class VideoFrameViewer(QMainWindow):
             return
 
         requested_frame = seconds_to_frame_index(seconds, self.TIME_BASE_FPS)
-        effective_frame = requested_frame + self.shift_value
-        self._goto_frame(effective_frame)
+        self._goto_frame(requested_frame)
 
     def _step_frames(self, step: int) -> None:
         if not self.video_handler.capture:
@@ -593,8 +608,8 @@ class VideoFrameViewer(QMainWindow):
         if self.video_handler.frame_count:
             info = f"{self.current_frame_index} / {self.video_handler.frame_count - 1} (0-based)"
             seconds_info = self._seconds_info_text()
-            shift_info = f"Shift: {self.shift_value:+d}"
-            sync_info = f"Sync offset: {self.sync_offset_seconds:+.2f}s"
+            shift_info = f"Shift: {self.shift_value:+d} frame(s)"
+            sync_info = f"Sync offset: {self.sync_offset_seconds:+.3f}s"
             self.frame_info_label.setText(
                 f"Frame {info}\n{seconds_info}\n{shift_info} | {sync_info}"
             )
