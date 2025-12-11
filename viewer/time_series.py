@@ -1,7 +1,7 @@
 """Time series loading and visualization helpers."""
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Optional
 
 import mne
@@ -15,14 +15,26 @@ PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
 def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_ROOT) -> Path:
     """Return the expected time series path for a given video file.
 
-    The path is built by matching the subject folder from the video and using the
-    base recording identifier (portion after ``MD.mff.`` without any trailing
-    numeric suffix) to locate ``ear_eog.fif`` in the processed dataset root.
+    The path is built by matching the subject folder from anywhere in the video
+    path and using the base recording identifier (portion after ``MD.mff.``
+    without any trailing numeric suffix) to locate ``ear_eog.fif`` in the
+    processed dataset root.
     """
 
-    normalized = Path(str(video_path).replace("\\", "/"))
+    raw_path = str(video_path)
+    normalized = Path(raw_path.replace("\\", "/"))
 
-    subject_folder = normalized.parent.name
+    parts = normalized.parts
+    if len(parts) == 1 and "\\" in raw_path:
+        parts = PureWindowsPath(raw_path).parts
+
+    subject_folder = next(
+        (part for part in reversed(parts) if part.upper().startswith("S") and part[1:].isdigit()),
+        None,
+    )
+    if subject_folder is None:
+        raise ValueError(f"Could not determine subject folder from {video_path}")
+
     stem = normalized.stem
     lower_stem = stem.lower()
     prefix = "md.mff."
@@ -78,7 +90,12 @@ class TimeSeriesViewer(QWidget):
             self.cursor_line.hide()
             return
 
-        ts_path = derive_time_series_path(video_path)
+        try:
+            ts_path = derive_time_series_path(video_path)
+        except ValueError as exc:  # pragma: no cover - guardrails for unexpected paths
+            self.status_label.setText(str(exc))
+            self.cursor_line.hide()
+            return
         if not ts_path.exists():
             self.status_label.setText(
                 f"Time series file not found at {ts_path}."
