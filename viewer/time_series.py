@@ -181,11 +181,11 @@ class TimeSeriesViewer(QWidget):
     def update_cursor_time(self, seconds: float) -> None:
         """Keep the current time centered under a fixed cursor."""
 
-        if self._times is None or seconds < 0:
+        if self._times is None or self._times.size == 0:
             self.cursor_line.hide()
             return
 
-        self._ensure_view_range(seconds)
+        self._ensure_view_range(max(0.0, seconds))
 
     def _plot_data(self) -> None:
         if self.raw is None:
