@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -119,6 +119,8 @@ class VideoFrameViewer(QMainWindow):
     TIME_BASE_FPS = 30
     PREVIEW_RANGE = 5
     PREVIEW_SIZE = QSize(96, 54)
+    MIN_ZOOM = 0.25
+    MAX_ZOOM = 10.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -137,6 +139,7 @@ class VideoFrameViewer(QMainWindow):
 
         self._setup_ui()
         self._setup_shortcuts()
+        self.frame_scroll.viewport().installEventFilter(self)
         self._update_navigation_state(False)
         self._initialize_dataset_root()
 
@@ -731,17 +734,54 @@ class VideoFrameViewer(QMainWindow):
         ]:
             button.setEnabled(enabled)
 
-    def _adjust_zoom(self, delta: float) -> None:
-        self._set_zoom(self.zoom_factor + delta)
+    def _adjust_zoom(self, delta: float, anchor: Optional[QPoint] = None) -> None:
+        self._set_zoom(self.zoom_factor + delta, anchor)
 
     def _reset_zoom(self) -> None:
         self._set_zoom(1.0)
 
-    def _set_zoom(self, zoom: float) -> None:
-        clamped_zoom = max(0.25, min(zoom, 3.0))
+    def _set_zoom(self, zoom: float, anchor: Optional[QPoint] = None) -> None:
+        pixmap = self.frame_label.pixmap()
+        viewport_size = self.frame_scroll.viewport().size()
+        h_bar = self.frame_scroll.horizontalScrollBar()
+        v_bar = self.frame_scroll.verticalScrollBar()
+
+        if pixmap:
+            current_width = max(1, pixmap.width())
+            current_height = max(1, pixmap.height())
+            if anchor is not None:
+                center_x_ratio = (h_bar.value() + anchor.x()) / current_width
+                center_y_ratio = (v_bar.value() + anchor.y()) / current_height
+            else:
+                center_x_ratio = (
+                    h_bar.value() + viewport_size.width() / 2
+                ) / current_width
+                center_y_ratio = (
+                    v_bar.value() + viewport_size.height() / 2
+                ) / current_height
+            center_x_ratio = max(0.0, min(1.0, center_x_ratio))
+            center_y_ratio = max(0.0, min(1.0, center_y_ratio))
+        else:
+            center_x_ratio = 0.5
+            center_y_ratio = 0.5
+
+        clamped_zoom = max(self.MIN_ZOOM, min(zoom, self.MAX_ZOOM))
         self.zoom_factor = clamped_zoom
         self.zoom_label.setText(self._zoom_label_text())
         self._refresh_displayed_frame()
+
+        pixmap = self.frame_label.pixmap()
+        if not pixmap:
+            return
+
+        new_width = max(1, pixmap.width())
+        new_height = max(1, pixmap.height())
+
+        target_x = (center_x_ratio * new_width) - (viewport_size.width() / 2)
+        target_y = (center_y_ratio * new_height) - (viewport_size.height() / 2)
+
+        h_bar.setValue(int(max(0, min(target_x, h_bar.maximum()))))
+        v_bar.setValue(int(max(0, min(target_y, v_bar.maximum()))))
 
     def _zoom_label_text(self) -> str:
         percent = int(self.zoom_factor * 100)
@@ -797,6 +837,19 @@ class VideoFrameViewer(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.video_handler.release()
         super().closeEvent(event)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if (
+            obj is self.frame_scroll.viewport()
+            and event.type() == QEvent.Wheel
+            and event.modifiers() & Qt.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            step = 0.25 if delta > 0 else -0.25
+            self._adjust_zoom(step, anchor=event.pos())
+            return True
+
+        return super().eventFilter(obj, event)
 
 
 def run_app() -> None:

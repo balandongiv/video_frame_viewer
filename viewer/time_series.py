@@ -7,7 +7,7 @@ from typing import List, Optional, Set
 import mne
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -121,6 +121,7 @@ class TimeSeriesViewer(QWidget):
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel("bottom", "Time", units="s")
         self.plot_widget.setLabel("left", "Channels")
+        self.plot_widget.viewport().installEventFilter(self)
 
         self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("r", width=2))
         self.plot_widget.addItem(self.cursor_line)
@@ -286,10 +287,12 @@ class TimeSeriesViewer(QWidget):
         self._plot_data()
         self._ensure_view_range(self._last_cursor_time)
 
-    def _adjust_zoom(self, multiplier: float) -> None:
+    def _adjust_zoom(self, multiplier: float, anchor_time: Optional[float] = None) -> None:
         self.view_span_seconds = max(
             self.min_span_seconds, min(self.view_span_seconds * multiplier, self._max_span_seconds())
         )
+        if anchor_time is not None:
+            self._last_cursor_time = max(0.0, anchor_time)
         self.zoom_label.setText(self._zoom_label_text())
         self._ensure_view_range(self._last_cursor_time)
 
@@ -346,3 +349,26 @@ class TimeSeriesViewer(QWidget):
 
         palette_index = (index + 1) % len(CHANNEL_PALETTE)
         return pg.mkPen(CHANNEL_PALETTE[palette_index], width=1)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if (
+            obj is self.plot_widget.viewport()
+            and event.type() == QEvent.Wheel
+            and event.modifiers() & Qt.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            multiplier = 0.8 if delta > 0 else 1.25
+            anchor_time = self._time_at_position(event.pos())
+            self._adjust_zoom(multiplier, anchor_time=anchor_time)
+            return True
+
+        return super().eventFilter(obj, event)
+
+    def _time_at_position(self, pos) -> Optional[float]:
+        view_box = self.plot_widget.getPlotItem().getViewBox()
+        if view_box is None:
+            return None
+
+        scene_pos = self.plot_widget.mapToScene(pos)
+        view_pos = view_box.mapSceneToView(scene_pos)
+        return view_pos.x()
