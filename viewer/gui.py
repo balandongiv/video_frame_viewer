@@ -338,7 +338,7 @@ class VideoFrameViewer(QMainWindow):
 
     def _scan_directory(self) -> None:
         root_text = self.directory_input.text().strip()
-        root_path = Path(root_text) if root_text else self.DATASET_ROOT
+        root_path = Path(root_text).expanduser() if root_text else self.DATASET_ROOT
         self.directory_input.setText(str(root_path))
 
         if not root_path.exists():

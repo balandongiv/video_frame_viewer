@@ -1,4 +1,5 @@
 """Utility helpers for the video viewer application."""
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -46,5 +47,19 @@ def is_md_mff_video(path: Path) -> bool:
 
 
 def find_md_mff_videos(root: Path) -> List[Path]:
-    """Return all MD.mff .mov videos under the given root, any extension case."""
-    return [path for path in root.rglob("*") if is_md_mff_video(path)]
+    """Return all MD.mff .mov videos under the given root, any extension case.
+
+    Uses ``os.walk`` to avoid platform-specific glob quirks and guarantees we
+    only return files that match the MD.mff pattern.
+    """
+
+    videos: List[Path] = []
+
+    for dirpath, _, filenames in os.walk(root):
+        dirpath_path = Path(dirpath)
+        for name in filenames:
+            candidate = dirpath_path / name
+            if is_md_mff_video(candidate):
+                videos.append(candidate)
+
+    return videos
