@@ -86,8 +86,8 @@ class TimeSeriesViewer(QWidget):
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
 
-        layout = QVBoxLayout()
-        self.setLayout(layout)
+        self._controls_container = QWidget(self)
+        control_layout = QVBoxLayout()
 
         control_row = QHBoxLayout()
         self.show_all_checkbox = QCheckBox("Show all channels")
@@ -113,6 +113,10 @@ class TimeSeriesViewer(QWidget):
         control_row.addWidget(self.zoom_label)
         control_row.addStretch()
 
+        control_layout.addLayout(control_row)
+        control_layout.addWidget(self.channel_list)
+        self._controls_container.setLayout(control_layout)
+
         self.plot_widget = pg.PlotWidget(background="w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel("bottom", "Time", units="s")
@@ -124,14 +128,18 @@ class TimeSeriesViewer(QWidget):
 
         self.status_label = QLabel("Load a video to view synchronized time series data.")
 
-        layout.addLayout(control_row)
-        layout.addWidget(self.channel_list)
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
         layout.addWidget(self.plot_widget)
         layout.addWidget(self.status_label)
-        layout.setStretch(0, 0)
+        layout.setStretch(0, 1)
         layout.setStretch(1, 0)
-        layout.setStretch(2, 1)
-        layout.setStretch(3, 0)
+
+    def channel_controls(self) -> QWidget:
+        """Expose the channel selection controls for external layouts."""
+
+        return self._controls_container
 
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""

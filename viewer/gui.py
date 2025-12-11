@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -126,6 +127,7 @@ class VideoFrameViewer(QMainWindow):
         self.shift_value: int = 0
         self.zoom_factor: float = 1.0
         self.last_frame = None
+        self.time_series_viewer = TimeSeriesViewer()
 
         self._setup_ui()
         self._update_navigation_state(False)
@@ -151,20 +153,10 @@ class VideoFrameViewer(QMainWindow):
         upper_splitter = QSplitter(Qt.Horizontal)
         upper_splitter.setChildrenCollapsible(False)
 
-        controls_and_list = QWidget()
-        controls_and_list_layout = QVBoxLayout()
-        controls_and_list_layout.setContentsMargins(0, 0, 0, 0)
-        controls_and_list_layout.setSpacing(6)
-        controls_and_list.setLayout(controls_and_list_layout)
-
-        video_list_panel = self._build_video_list_panel()
-        control_group = self._build_control_panel()
-        controls_and_list_layout.addWidget(video_list_panel)
-        controls_and_list_layout.addWidget(control_group)
-
+        side_tabs = self._build_side_tabs()
         frame_panel = self._build_frame_panel()
 
-        upper_splitter.addWidget(controls_and_list)
+        upper_splitter.addWidget(side_tabs)
         upper_splitter.addWidget(frame_panel)
         upper_splitter.setStretchFactor(0, 1)
         upper_splitter.setStretchFactor(1, 5)
@@ -290,7 +282,6 @@ class VideoFrameViewer(QMainWindow):
     def _build_time_series_panel(self) -> QWidget:
         time_series_group = QGroupBox("Time Series")
         time_series_layout = QVBoxLayout()
-        self.time_series_viewer = TimeSeriesViewer()
         self.time_series_viewer.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
         )
@@ -299,6 +290,32 @@ class VideoFrameViewer(QMainWindow):
         time_series_group.setLayout(time_series_layout)
         time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         return time_series_group
+
+    def _build_side_tabs(self) -> QTabWidget:
+        tabs = QTabWidget()
+
+        videos_tab = QWidget()
+        videos_layout = QVBoxLayout()
+        videos_layout.setContentsMargins(0, 0, 0, 0)
+        videos_layout.setSpacing(6)
+        videos_layout.addWidget(self._build_video_list_panel())
+        videos_layout.addWidget(self._build_control_panel())
+        videos_layout.setStretch(0, 1)
+        videos_layout.setStretch(1, 0)
+        videos_tab.setLayout(videos_layout)
+
+        channels_tab = QWidget()
+        channels_layout = QVBoxLayout()
+        channels_layout.setContentsMargins(0, 0, 0, 0)
+        channels_layout.setSpacing(6)
+        channels_layout.addWidget(self.time_series_viewer.channel_controls())
+        channels_layout.addStretch()
+        channels_tab.setLayout(channels_layout)
+
+        tabs.addTab(videos_tab, "Videos")
+        tabs.addTab(channels_tab, "Channels")
+
+        return tabs
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
