@@ -12,6 +12,7 @@ class VideoHandler:
     def __init__(self) -> None:
         self.capture: Optional[cv2.VideoCapture] = None
         self.frame_count: int = 0
+        self.fps: float = 0.0
         self.video_path: Optional[Path] = None
 
     def load(self, path: Path) -> bool:
@@ -24,6 +25,7 @@ class VideoHandler:
         self.capture = capture
         self.video_path = path
         self.frame_count = max(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 0)
+        self.fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         return True
 
     def release(self) -> None:
@@ -33,6 +35,7 @@ class VideoHandler:
         self.capture = None
         self.video_path = None
         self.frame_count = 0
+        self.fps = 0.0
 
     def clamp_index(self, index: int) -> int:
         """Clamp a frame index to the valid range of the loaded video."""

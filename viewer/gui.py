@@ -484,11 +484,21 @@ class VideoFrameViewer(QMainWindow):
     def _update_frame_label(self) -> None:
         if self.video_handler.frame_count:
             info = f"{self.current_frame_index} / {self.video_handler.frame_count - 1} (0-based)"
-            self.frame_info_label.setText(f"Frame {info}")
-            self.current_frame_label.setText(f"Current frame: {info}")
+            seconds_info = self._seconds_info_text()
+            self.frame_info_label.setText(f"Frame {info}\n{seconds_info}")
+            self.current_frame_label.setText(f"Current frame: {info} | {seconds_info}")
         else:
             self.frame_info_label.setText("Frame: -")
             self.current_frame_label.setText("Current frame: -")
+
+    def _seconds_info_text(self) -> str:
+        fps = self.video_handler.fps
+        if fps <= 0 or self.video_handler.frame_count <= 0:
+            return "Seconds: unavailable"
+
+        current_seconds = self.current_frame_index / fps
+        total_seconds = self.video_handler.frame_count / fps
+        return f"Seconds: {current_seconds:.2f} / {total_seconds:.2f}"
 
     def _update_previews(self) -> None:
         if self.video_handler.frame_count <= 0:

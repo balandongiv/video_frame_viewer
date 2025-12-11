@@ -34,6 +34,7 @@ class VideoHandlerTestCase(unittest.TestCase):
 
         self.assertTrue(handler.load(video_path))
         self.assertEqual(handler.frame_count, 3)
+        self.assertAlmostEqual(handler.fps, 1.0, places=2)
 
         handler.release()
         self.assertIsNone(handler.capture)
@@ -55,6 +56,15 @@ class VideoHandlerTestCase(unittest.TestCase):
 
         out_of_range_frame = handler.read_frame(10)
         self.assertIsNotNone(out_of_range_frame)
+
+    def test_release_resets_fps(self) -> None:
+        video_path = create_temp_video(self.tmp_dir)
+        handler = VideoHandler()
+        self.assertTrue(handler.load(video_path))
+        self.assertGreater(handler.fps, 0)
+
+        handler.release()
+        self.assertEqual(handler.fps, 0.0)
 
 
 if __name__ == "__main__":
