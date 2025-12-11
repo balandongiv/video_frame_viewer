@@ -119,6 +119,8 @@ class VideoFrameViewer(QMainWindow):
     TIME_BASE_FPS = 30
     PREVIEW_RANGE = 5
     PREVIEW_SIZE = QSize(96, 54)
+    MIN_ZOOM = 0.25
+    MAX_ZOOM = 10.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -738,10 +740,43 @@ class VideoFrameViewer(QMainWindow):
         self._set_zoom(1.0)
 
     def _set_zoom(self, zoom: float) -> None:
-        clamped_zoom = max(0.25, min(zoom, 3.0))
+        pixmap = self.frame_label.pixmap()
+        viewport_size = self.frame_scroll.viewport().size()
+        h_bar = self.frame_scroll.horizontalScrollBar()
+        v_bar = self.frame_scroll.verticalScrollBar()
+
+        if pixmap:
+            current_width = max(1, pixmap.width())
+            current_height = max(1, pixmap.height())
+            center_x_ratio = (
+                h_bar.value() + viewport_size.width() / 2
+            ) / current_width
+            center_y_ratio = (
+                v_bar.value() + viewport_size.height() / 2
+            ) / current_height
+            center_x_ratio = max(0.0, min(1.0, center_x_ratio))
+            center_y_ratio = max(0.0, min(1.0, center_y_ratio))
+        else:
+            center_x_ratio = 0.5
+            center_y_ratio = 0.5
+
+        clamped_zoom = max(self.MIN_ZOOM, min(zoom, self.MAX_ZOOM))
         self.zoom_factor = clamped_zoom
         self.zoom_label.setText(self._zoom_label_text())
         self._refresh_displayed_frame()
+
+        pixmap = self.frame_label.pixmap()
+        if not pixmap:
+            return
+
+        new_width = max(1, pixmap.width())
+        new_height = max(1, pixmap.height())
+
+        target_x = (center_x_ratio * new_width) - (viewport_size.width() / 2)
+        target_y = (center_y_ratio * new_height) - (viewport_size.height() / 2)
+
+        h_bar.setValue(int(max(0, min(target_x, h_bar.maximum()))))
+        v_bar.setValue(int(max(0, min(target_y, v_bar.maximum()))))
 
     def _zoom_label_text(self) -> str:
         percent = int(self.zoom_factor * 100)
