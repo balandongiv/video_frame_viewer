@@ -42,8 +42,17 @@ def seconds_to_frame_index(seconds: float, fps: float = 30.0) -> int:
 
 
 def is_md_mff_video(path: Path) -> bool:
-    """Return True if the path points to an MD.mff .mov video file."""
-    return path.suffix.lower() == ".mov" and "md.mff" in path.name.lower()
+    """Return True if the path points to an MD.mff .mov video file.
+
+    Some datasets store videos inside a directory named ``MD.mff`` without
+    repeating the token in the filename itself. We therefore check every path
+    component for ``MD.mff`` in addition to the filename.
+    """
+
+    if path.suffix.lower() != ".mov":
+        return False
+
+    return any("md.mff" in part.lower() for part in path.parts)
 
 
 def find_md_mff_videos(root: Path) -> List[Path]:

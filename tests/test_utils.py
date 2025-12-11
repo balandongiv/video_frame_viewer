@@ -37,8 +37,17 @@ class MdMffVideoTests(unittest.TestCase):
             nested_dir = root / "nested"
             nested_dir.mkdir()
             nested_match = nested_dir / "MD.mff.nested.mov"
+            md_dir = root / "MD.mff"
+            md_dir.mkdir()
+            md_dir_match = md_dir / "S01_20170519_043933.mov"
 
-            for path in [matching_lower, matching_upper, non_matching, nested_match]:
+            for path in [
+                matching_lower,
+                matching_upper,
+                non_matching,
+                nested_match,
+                md_dir_match,
+            ]:
                 path.touch()
 
             results = find_md_mff_videos(root)
@@ -46,6 +55,7 @@ class MdMffVideoTests(unittest.TestCase):
             self.assertIn(matching_lower, results)
             self.assertIn(matching_upper, results)
             self.assertIn(nested_match, results)
+            self.assertIn(md_dir_match, results)
             self.assertNotIn(non_matching, results)
 
 
