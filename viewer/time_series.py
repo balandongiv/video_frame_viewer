@@ -20,6 +20,11 @@ from PyQt5.QtWidgets import (
 )
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
+DEFAULT_VISIBLE_CHANNELS = {
+    "EOG-EEG-eog-vert_left",
+    "EOG-EEG-eog-vert_right",
+    "EAR_avg_ear",
+}
 
 
 def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_ROOT) -> Path:
@@ -81,7 +86,7 @@ class TimeSeriesViewer(QWidget):
 
         control_row = QHBoxLayout()
         self.show_all_checkbox = QCheckBox("Show all channels")
-        self.show_all_checkbox.setChecked(True)
+        self.show_all_checkbox.setChecked(False)
         self.show_all_checkbox.stateChanged.connect(self._on_show_all_channels)
 
         self.channel_list = QListWidget()
@@ -205,14 +210,28 @@ class TimeSeriesViewer(QWidget):
             return
 
         self.channel_list.blockSignals(True)
+        self.show_all_checkbox.blockSignals(True)
+        self.show_all_checkbox.setChecked(False)
         self.channel_list.clear()
+
+        defaults_present: Set[str] = set()
         for name in self.raw.ch_names:
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
+            is_default = name in DEFAULT_VISIBLE_CHANNELS
+            if is_default:
+                defaults_present.add(name)
+            item.setCheckState(Qt.Checked if is_default else Qt.Unchecked)
             self.channel_list.addItem(item)
+
+        if not defaults_present and self.raw.ch_names:
+            first_item = self.channel_list.item(0)
+            first_item.setCheckState(Qt.Checked)
+            defaults_present.add(first_item.text())
+
         self.channel_list.blockSignals(False)
-        self._selected_channels = set(self.raw.ch_names)
+        self.show_all_checkbox.blockSignals(False)
+        self._selected_channels = defaults_present
 
     def _channel_indices(self) -> List[int]:
         if self.raw is None:

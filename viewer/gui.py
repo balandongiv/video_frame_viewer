@@ -140,21 +140,38 @@ class VideoFrameViewer(QMainWindow):
 
         self._build_directory_controls(main_layout)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        self._main_splitter = QSplitter(Qt.Vertical)
+        self._main_splitter.setChildrenCollapsible(False)
+
+        top_container = QWidget()
+        top_layout = QVBoxLayout()
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_container.setLayout(top_layout)
+
+        upper_splitter = QSplitter(Qt.Horizontal)
+        upper_splitter.setChildrenCollapsible(False)
 
         video_list_panel = self._build_video_list_panel()
         frame_panel = self._build_frame_panel()
 
-        splitter.addWidget(video_list_panel)
-        splitter.addWidget(frame_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        upper_splitter.addWidget(video_list_panel)
+        upper_splitter.addWidget(frame_panel)
+        upper_splitter.setStretchFactor(0, 1)
+        upper_splitter.setStretchFactor(1, 4)
 
-        main_layout.addWidget(splitter)
+        top_layout.addWidget(upper_splitter)
 
         control_group = self._build_control_panel()
-        main_layout.addWidget(control_group)
+        top_layout.addWidget(control_group)
+
+        time_series_group = self._build_time_series_panel()
+
+        self._main_splitter.addWidget(top_container)
+        self._main_splitter.addWidget(time_series_group)
+        self._main_splitter.setStretchFactor(0, 5)
+        self._main_splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(self._main_splitter)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -200,33 +217,14 @@ class VideoFrameViewer(QMainWindow):
 
         layout.addWidget(QLabel("Frame Display"))
 
-        self.preview_group = QGroupBox("Surrounding Frames")
-        preview_layout = QHBoxLayout()
-        preview_layout.setContentsMargins(6, 6, 6, 6)
-        preview_layout.setSpacing(4)
+        frame_and_preview_splitter = QSplitter(Qt.Horizontal)
+        frame_and_preview_splitter.setChildrenCollapsible(False)
 
-        preview_strip = QWidget()
-        preview_strip_layout = QHBoxLayout()
-        preview_strip_layout.setContentsMargins(0, 0, 0, 0)
-        preview_strip_layout.setSpacing(6)
-        preview_strip.setLayout(preview_strip_layout)
-
-        self.preview_widgets: List[PreviewWidget] = []
-        for _ in range(self._preview_count):
-            widget = PreviewWidget(self.PREVIEW_SIZE)
-            widget.set_pixmap(None)
-            self.preview_widgets.append(widget)
-            preview_strip_layout.addWidget(widget)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(preview_strip)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        preview_layout.addWidget(scroll_area)
-        self.preview_group.setLayout(preview_layout)
-        layout.addWidget(self.preview_group)
+        frame_area = QWidget()
+        frame_area_layout = QVBoxLayout()
+        frame_area_layout.setContentsMargins(0, 0, 0, 0)
+        frame_area_layout.setSpacing(4)
+        frame_area.setLayout(frame_area_layout)
 
         self.frame_label = PannableLabel("Scan and select a video to view frames.")
         self.frame_label.setAlignment(Qt.AlignCenter)
@@ -242,20 +240,58 @@ class VideoFrameViewer(QMainWindow):
         self.frame_info_label = QLabel("Frame: -")
         self.frame_info_label.setAlignment(Qt.AlignCenter)
 
-        layout.addWidget(self.frame_scroll)
-        layout.addWidget(self.frame_info_label)
+        frame_area_layout.addWidget(self.frame_scroll)
+        frame_area_layout.addWidget(self.frame_info_label)
 
+        frame_and_preview_splitter.addWidget(frame_area)
+
+        self.preview_group = QGroupBox("Surrounding Frames")
+        preview_layout = QVBoxLayout()
+        preview_layout.setContentsMargins(6, 6, 6, 6)
+        preview_layout.setSpacing(4)
+
+        preview_strip = QWidget()
+        preview_strip_layout = QVBoxLayout()
+        preview_strip_layout.setContentsMargins(0, 0, 0, 0)
+        preview_strip_layout.setSpacing(6)
+        preview_strip.setLayout(preview_strip_layout)
+
+        self.preview_widgets: List[PreviewWidget] = []
+        for _ in range(self._preview_count):
+            widget = PreviewWidget(self.PREVIEW_SIZE)
+            widget.set_pixmap(None)
+            self.preview_widgets.append(widget)
+            preview_strip_layout.addWidget(widget)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(preview_strip)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        preview_layout.addWidget(scroll_area)
+        self.preview_group.setLayout(preview_layout)
+        frame_and_preview_splitter.addWidget(self.preview_group)
+
+        frame_and_preview_splitter.setStretchFactor(0, 5)
+        frame_and_preview_splitter.setStretchFactor(1, 1)
+
+        layout.addWidget(frame_and_preview_splitter)
+
+        return container
+
+    def _build_time_series_panel(self) -> QWidget:
         time_series_group = QGroupBox("Time Series")
         time_series_layout = QVBoxLayout()
         self.time_series_viewer = TimeSeriesViewer()
-        self.time_series_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.time_series_viewer.setMinimumHeight(240)
+        self.time_series_viewer.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
+        self.time_series_viewer.setMinimumHeight(140)
         time_series_layout.addWidget(self.time_series_viewer)
         time_series_group.setLayout(time_series_layout)
-        time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(time_series_group)
-
-        return container
+        time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        return time_series_group
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
