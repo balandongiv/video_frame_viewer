@@ -125,7 +125,7 @@ class VideoFrameViewer(QMainWindow):
         self.video_paths: List[Path] = []
         self.current_frame_index: int = 0
         self.shift_value: int = 0
-        self.sync_offset_seconds: int = 0
+        self.sync_offset_seconds: float = 0.0
         self.zoom_factor: float = 1.0
         self.last_frame = None
         self.time_series_viewer = TimeSeriesViewer()
@@ -342,7 +342,7 @@ class VideoFrameViewer(QMainWindow):
 
         self.sync_offset_input = QLineEdit()
         self.sync_offset_input.setPlaceholderText(
-            "Sync offset in seconds (integer, can be negative)"
+            "Sync offset in seconds (can be negative)"
         )
         self.sync_offset_input.returnPressed.connect(self._apply_sync_offset)
         apply_sync_offset_button = QPushButton("Apply Sync Offset")
@@ -477,30 +477,34 @@ class VideoFrameViewer(QMainWindow):
         if not shift_text:
             self.shift_value = 0
             self._set_status("Shift cleared (0).")
+            self._update_frame_label()
             return
 
         try:
             self.shift_value = int(shift_text)
             self._set_status(f"Shift set to {self.shift_value}.")
+            self._update_frame_label()
         except ValueError:
             self._set_status("Invalid shift value. Please enter an integer.")
 
     def _apply_sync_offset(self) -> None:
         offset_text = self.sync_offset_input.text().strip()
         if not offset_text:
-            self.sync_offset_seconds = 0
+            self.sync_offset_seconds = 0.0
             self._set_status("Sync offset cleared (0s).")
             self._update_time_series_cursor()
+            self._update_frame_label()
             return
 
         try:
-            self.sync_offset_seconds = int(offset_text)
+            self.sync_offset_seconds = float(offset_text)
             self._set_status(
-                f"Sync offset set to {self.sync_offset_seconds} second(s)."
+                f"Sync offset set to {self.sync_offset_seconds:.2f} second(s)."
             )
             self._update_time_series_cursor()
+            self._update_frame_label()
         except ValueError:
-            self._set_status("Invalid sync offset. Please enter an integer.")
+            self._set_status("Invalid sync offset. Please enter a number.")
 
     def _search_frame(self) -> None:
         if not self.video_handler.capture:
@@ -589,8 +593,14 @@ class VideoFrameViewer(QMainWindow):
         if self.video_handler.frame_count:
             info = f"{self.current_frame_index} / {self.video_handler.frame_count - 1} (0-based)"
             seconds_info = self._seconds_info_text()
-            self.frame_info_label.setText(f"Frame {info}\n{seconds_info}")
-            self.current_frame_label.setText(f"Current frame: {info} | {seconds_info}")
+            shift_info = f"Shift: {self.shift_value:+d}"
+            sync_info = f"Sync offset: {self.sync_offset_seconds:+.2f}s"
+            self.frame_info_label.setText(
+                f"Frame {info}\n{seconds_info}\n{shift_info} | {sync_info}"
+            )
+            self.current_frame_label.setText(
+                f"Current frame: {info} | {seconds_info} | {shift_info} | {sync_info}"
+            )
         else:
             self.frame_info_label.setText("Frame: -")
             self.current_frame_label.setText("Current frame: -")
