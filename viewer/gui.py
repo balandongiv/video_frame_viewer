@@ -411,8 +411,8 @@ class VideoFrameViewer(QMainWindow):
         self.left_jump_button = QPushButton("Left_Jump")
         self.right_jump_button = QPushButton("Right_Jump")
 
-        self.left_button.clicked.connect(lambda: self._step_frames(-self.SINGLE_STEP))
-        self.right_button.clicked.connect(lambda: self._step_frames(self.SINGLE_STEP))
+        self.left_button.clicked.connect(self._trigger_left_step)
+        self.right_button.clicked.connect(self._trigger_right_step)
         self.left_jump_button.clicked.connect(self._trigger_left_jump)
         self.right_jump_button.clicked.connect(self._trigger_right_jump)
 
@@ -608,6 +608,12 @@ class VideoFrameViewer(QMainWindow):
         target_frame = self.current_frame_index + step
         self._goto_frame(target_frame)
 
+    def _trigger_left_step(self) -> None:
+        self._step_frames(-self.SINGLE_STEP)
+
+    def _trigger_right_step(self) -> None:
+        self._step_frames(self.SINGLE_STEP)
+
     def _trigger_left_jump(self) -> None:
         self._step_frames(-self.left_jump_size)
 
@@ -763,8 +769,18 @@ class VideoFrameViewer(QMainWindow):
         right_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         right_shortcut.activated.connect(self._handle_right_shortcut)
 
+        left_step_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Left), self)
+        left_step_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        left_step_shortcut.activated.connect(self._trigger_left_step)
+
+        right_step_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Right), self)
+        right_step_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        right_step_shortcut.activated.connect(self._trigger_right_step)
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
+        self.left_step_shortcut = left_step_shortcut
+        self.right_step_shortcut = right_step_shortcut
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
