@@ -2,12 +2,22 @@
 from __future__ import annotations
 
 from pathlib import Path, PureWindowsPath
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import mne
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
 
@@ -60,9 +70,38 @@ class TimeSeriesViewer(QWidget):
         self.raw: Optional[mne.io.BaseRaw] = None
         self._plotted_curves: List[pg.PlotDataItem] = []
         self._times: Optional[np.ndarray] = None
+        self._selected_channels: Set[str] = set()
+        self._last_cursor_time: float = 0.0
+        self.view_span_seconds: float = 10.0
+        self.min_span_seconds: float = 0.1
+        self._last_ts_path: Optional[Path] = None
 
         layout = QVBoxLayout()
         self.setLayout(layout)
+
+        control_row = QHBoxLayout()
+        self.show_all_checkbox = QCheckBox("Show all channels")
+        self.show_all_checkbox.setChecked(True)
+        self.show_all_checkbox.stateChanged.connect(self._on_show_all_channels)
+
+        self.channel_list = QListWidget()
+        self.channel_list.setMaximumHeight(120)
+        self.channel_list.itemChanged.connect(self._on_channel_item_changed)
+
+        self.zoom_out_button = QPushButton("Zoom -")
+        self.zoom_out_button.clicked.connect(lambda: self._adjust_zoom(1.25))
+        self.zoom_in_button = QPushButton("Zoom +")
+        self.zoom_in_button.clicked.connect(lambda: self._adjust_zoom(0.8))
+        self.zoom_reset_button = QPushButton("Reset Zoom")
+        self.zoom_reset_button.clicked.connect(self._reset_zoom)
+        self.zoom_label = QLabel(self._zoom_label_text())
+
+        control_row.addWidget(self.show_all_checkbox)
+        control_row.addWidget(self.zoom_out_button)
+        control_row.addWidget(self.zoom_in_button)
+        control_row.addWidget(self.zoom_reset_button)
+        control_row.addWidget(self.zoom_label)
+        control_row.addStretch()
 
         self.plot_widget = pg.PlotWidget(background="w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -75,6 +114,8 @@ class TimeSeriesViewer(QWidget):
 
         self.status_label = QLabel("Load a video to view synchronized time series data.")
 
+        layout.addLayout(control_row)
+        layout.addWidget(self.channel_list)
         layout.addWidget(self.plot_widget)
         layout.addWidget(self.status_label)
 
@@ -84,6 +125,10 @@ class TimeSeriesViewer(QWidget):
         self._clear_plot()
         self._times = None
         self.raw = None
+        self._selected_channels.clear()
+        self.channel_list.clear()
+        self._reset_zoom()
+        self._last_ts_path = None
 
         if video_path is None:
             self.status_label.setText("Select a video to view its time series.")
@@ -104,25 +149,32 @@ class TimeSeriesViewer(QWidget):
             return
 
         self.status_label.setText(f"Loaded time series from {ts_path}.")
+        self._last_ts_path = ts_path
         self.raw = mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
         self._times = self.raw.times
+        self._populate_channel_list()
         self._plot_data()
+        self._ensure_view_range(0.0)
 
     def update_cursor_time(self, seconds: float) -> None:
-        """Move the vertical cursor line to the provided timestamp."""
+        """Keep the current time centered under a fixed cursor."""
 
         if self._times is None or seconds < 0:
             self.cursor_line.hide()
             return
 
-        self.cursor_line.setPos(seconds)
-        self.cursor_line.show()
+        self._ensure_view_range(seconds)
 
     def _plot_data(self) -> None:
         if self.raw is None:
             return
 
-        data = self.raw.get_data()
+        picks = self._channel_indices()
+        if not picks:
+            self.status_label.setText("Select at least one channel to display.")
+            return
+
+        data = self.raw.get_data(picks=picks)
         times = self._times
         if times is None:
             return
@@ -143,10 +195,113 @@ class TimeSeriesViewer(QWidget):
             self._plotted_curves.append(curve)
 
         self.cursor_line.show()
+        total_channels = len(self.raw.ch_names) if self.raw else len(picks)
+        self.status_label.setText(
+            f"Displaying {len(picks)} of {total_channels} channel(s) from {self._last_ts_path}"
+        )
 
-    def _clear_plot(self) -> None:
+    def _populate_channel_list(self) -> None:
+        if self.raw is None:
+            return
+
+        self.channel_list.blockSignals(True)
+        self.channel_list.clear()
+        for name in self.raw.ch_names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.channel_list.addItem(item)
+        self.channel_list.blockSignals(False)
+        self._selected_channels = set(self.raw.ch_names)
+
+    def _channel_indices(self) -> List[int]:
+        if self.raw is None:
+            return []
+
+        if self.show_all_checkbox.isChecked() or not self._selected_channels:
+            return list(range(len(self.raw.ch_names)))
+
+        return [idx for idx, name in enumerate(self.raw.ch_names) if name in self._selected_channels]
+
+    def _on_show_all_channels(self, state: int) -> None:
+        if state == Qt.Checked:
+            self._selected_channels.clear()
+        else:
+            self._selected_channels = self._checked_channel_names()
+        self._replot()
+
+    def _on_channel_item_changed(self, item: QListWidgetItem) -> None:
+        name = item.text()
+        if item.checkState() == Qt.Checked:
+            self._selected_channels.add(name)
+        else:
+            self._selected_channels.discard(name)
+        if not self.show_all_checkbox.isChecked():
+            self._replot()
+
+    def _checked_channel_names(self) -> Set[str]:
+        names: Set[str] = set()
+        for index in range(self.channel_list.count()):
+            item = self.channel_list.item(index)
+            if item.checkState() == Qt.Checked:
+                names.add(item.text())
+        return names
+
+    def _replot(self) -> None:
+        self._clear_plot(hide_cursor=False)
+        self._plot_data()
+        self._ensure_view_range(self._last_cursor_time)
+
+    def _adjust_zoom(self, multiplier: float) -> None:
+        self.view_span_seconds = max(
+            self.min_span_seconds, min(self.view_span_seconds * multiplier, self._max_span_seconds())
+        )
+        self.zoom_label.setText(self._zoom_label_text())
+        self._ensure_view_range(self._last_cursor_time)
+
+    def _reset_zoom(self) -> None:
+        self.view_span_seconds = min(10.0, self._max_span_seconds())
+        self.zoom_label.setText(self._zoom_label_text())
+        self._ensure_view_range(self._last_cursor_time)
+
+    def _zoom_label_text(self) -> str:
+        return f"Zoom window: {self.view_span_seconds:.2f}s"
+
+    def _ensure_view_range(self, target_time: float) -> None:
+        if self._times is None or self._times.size == 0:
+            return
+
+        self._last_cursor_time = max(0.0, min(target_time, float(self._times[-1])))
+        half_span = self.view_span_seconds / 2
+        data_end = float(self._times[-1])
+
+        x_min = self._last_cursor_time - half_span
+        x_max = self._last_cursor_time + half_span
+
+        if x_min < 0:
+            x_min = 0.0
+            x_max = min(self.view_span_seconds, data_end)
+
+        if x_max > data_end:
+            x_max = data_end
+            x_min = max(0.0, data_end - self.view_span_seconds)
+
+        self.plot_widget.setXRange(x_min, x_max, padding=0)
+        center = (x_min + x_max) / 2 if x_max > x_min else self._last_cursor_time
+        self.cursor_line.setPos(center)
+        self.cursor_line.show()
+        self.plot_widget.enableAutoRange(y=True)
+
+    def _max_span_seconds(self) -> float:
+        if self._times is None or self._times.size == 0:
+            return max(self.view_span_seconds, self.min_span_seconds)
+        duration = float(self._times[-1])
+        return max(self.min_span_seconds, duration)
+
+    def _clear_plot(self, hide_cursor: bool = True) -> None:
         for curve in self._plotted_curves:
             self.plot_widget.removeItem(curve)
         self._plotted_curves.clear()
         self.plot_widget.enableAutoRange()
-        self.cursor_line.hide()
+        if hide_cursor:
+            self.cursor_line.hide()

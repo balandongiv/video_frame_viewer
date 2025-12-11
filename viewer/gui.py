@@ -248,8 +248,11 @@ class VideoFrameViewer(QMainWindow):
         time_series_group = QGroupBox("Time Series")
         time_series_layout = QVBoxLayout()
         self.time_series_viewer = TimeSeriesViewer()
+        self.time_series_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.time_series_viewer.setMinimumHeight(240)
         time_series_layout.addWidget(self.time_series_viewer)
         time_series_group.setLayout(time_series_layout)
+        time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(time_series_group)
 
         return container
