@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from viewer.utils import frame_to_pixmap, placeholder_pixmap
+from viewer.utils import frame_to_pixmap, placeholder_pixmap, seconds_to_frame_index
 from viewer.video_handler import VideoHandler
 
 
@@ -65,6 +65,7 @@ class VideoFrameViewer(QMainWindow):
 
     SINGLE_STEP = 1
     JUMP_STEP = 10
+    TIME_BASE_FPS = 30
     PREVIEW_RANGE = 5
     PREVIEW_SIZE = QSize(120, 68)
 
@@ -76,6 +77,8 @@ class VideoFrameViewer(QMainWindow):
         self.video_paths: List[Path] = []
         self.current_frame_index: int = 0
         self.shift_value: int = 0
+        self.zoom_factor: float = 1.0
+        self.last_frame = None
 
         self._setup_ui()
         self._update_navigation_state(False)
@@ -177,13 +180,18 @@ class VideoFrameViewer(QMainWindow):
 
         self.frame_label = QLabel("Scan and select a video to view frames.")
         self.frame_label.setAlignment(Qt.AlignCenter)
-        self.frame_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.frame_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.frame_label.setMinimumSize(640, 360)
+
+        self.frame_scroll = QScrollArea()
+        self.frame_scroll.setWidgetResizable(True)
+        self.frame_scroll.setWidget(self.frame_label)
+        self.frame_scroll.setAlignment(Qt.AlignCenter)
 
         self.frame_info_label = QLabel("Frame: -")
         self.frame_info_label.setAlignment(Qt.AlignCenter)
 
-        layout.addWidget(self.frame_label)
+        layout.addWidget(self.frame_scroll)
         layout.addWidget(self.frame_info_label)
 
         return container
@@ -198,6 +206,11 @@ class VideoFrameViewer(QMainWindow):
         self.search_button = QPushButton("Search")
         self.search_button.clicked.connect(self._search_frame)
 
+        self.time_input = QLineEdit()
+        self.time_input.setPlaceholderText("Enter time in seconds")
+        self.time_search_button = QPushButton("Search Time")
+        self.time_search_button.clicked.connect(self._search_time)
+
         self.shift_input = QLineEdit()
         self.shift_input.setPlaceholderText("Shift frame (can be negative)")
         apply_shift_button = QPushButton("Apply Shift")
@@ -207,9 +220,13 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(self.frame_input, 0, 1)
         control_layout.addWidget(self.search_button, 0, 2)
 
-        control_layout.addWidget(QLabel("Shift Frame:"), 1, 0)
-        control_layout.addWidget(self.shift_input, 1, 1)
-        control_layout.addWidget(apply_shift_button, 1, 2)
+        control_layout.addWidget(QLabel("Time (seconds):"), 1, 0)
+        control_layout.addWidget(self.time_input, 1, 1)
+        control_layout.addWidget(self.time_search_button, 1, 2)
+
+        control_layout.addWidget(QLabel("Shift Frame:"), 2, 0)
+        control_layout.addWidget(self.shift_input, 2, 1)
+        control_layout.addWidget(apply_shift_button, 2, 2)
 
         navigation_layout = QHBoxLayout()
         self.left_button = QPushButton("Left")
@@ -227,10 +244,26 @@ class VideoFrameViewer(QMainWindow):
         navigation_layout.addWidget(self.left_jump_button)
         navigation_layout.addWidget(self.right_jump_button)
 
-        control_layout.addLayout(navigation_layout, 2, 0, 1, 3)
+        control_layout.addLayout(navigation_layout, 3, 0, 1, 3)
+
+        zoom_layout = QHBoxLayout()
+        self.zoom_out_button = QPushButton("Zoom -")
+        self.zoom_out_button.clicked.connect(lambda: self._adjust_zoom(-0.25))
+        self.zoom_in_button = QPushButton("Zoom +")
+        self.zoom_in_button.clicked.connect(lambda: self._adjust_zoom(0.25))
+        self.zoom_reset_button = QPushButton("Reset Zoom")
+        self.zoom_reset_button.clicked.connect(self._reset_zoom)
+        self.zoom_label = QLabel(self._zoom_label_text())
+
+        zoom_layout.addWidget(self.zoom_out_button)
+        zoom_layout.addWidget(self.zoom_in_button)
+        zoom_layout.addWidget(self.zoom_reset_button)
+        zoom_layout.addWidget(self.zoom_label)
+
+        control_layout.addLayout(zoom_layout, 4, 0, 1, 3)
 
         self.current_frame_label = QLabel("Current frame: -")
-        control_layout.addWidget(self.current_frame_label, 3, 0, 1, 3)
+        control_layout.addWidget(self.current_frame_label, 5, 0, 1, 3)
 
         return control_group
 
@@ -327,6 +360,26 @@ class VideoFrameViewer(QMainWindow):
         effective_frame = requested_frame + self.shift_value
         self._goto_frame(effective_frame)
 
+    def _search_time(self) -> None:
+        if not self.video_handler.capture:
+            self._set_status("Load a video before searching for frames.")
+            return
+
+        time_text = self.time_input.text().strip()
+        if not time_text:
+            self._set_status("Enter a time value in seconds to search.")
+            return
+
+        try:
+            seconds = float(time_text)
+        except ValueError:
+            self._set_status("Invalid time value. Please enter a number of seconds.")
+            return
+
+        requested_frame = seconds_to_frame_index(seconds, self.TIME_BASE_FPS)
+        effective_frame = requested_frame + self.shift_value
+        self._goto_frame(effective_frame)
+
     def _step_frames(self, step: int) -> None:
         if not self.video_handler.capture:
             self._set_status("Load a video to navigate frames.")
@@ -361,11 +414,14 @@ class VideoFrameViewer(QMainWindow):
 
     # Display helpers
     def _display_frame(self, frame) -> None:
-        pixmap = frame_to_pixmap(frame, self.frame_label.size())
+        target_size = self._target_display_size()
+        pixmap = frame_to_pixmap(frame, target_size)
         if pixmap is None:
             self.frame_label.setText("Unable to display frame.")
             return
+        self.last_frame = frame
         self.frame_label.setPixmap(pixmap)
+        self.frame_label.resize(pixmap.size())
 
     def _update_frame_label(self) -> None:
         if self.video_handler.frame_count:
@@ -404,8 +460,35 @@ class VideoFrameViewer(QMainWindow):
             self.left_jump_button,
             self.right_jump_button,
             self.search_button,
+            self.time_search_button,
         ]:
             button.setEnabled(enabled)
+
+    def _adjust_zoom(self, delta: float) -> None:
+        self._set_zoom(self.zoom_factor + delta)
+
+    def _reset_zoom(self) -> None:
+        self._set_zoom(1.0)
+
+    def _set_zoom(self, zoom: float) -> None:
+        clamped_zoom = max(0.25, min(zoom, 3.0))
+        self.zoom_factor = clamped_zoom
+        self.zoom_label.setText(self._zoom_label_text())
+        self._refresh_displayed_frame()
+
+    def _zoom_label_text(self) -> str:
+        percent = int(self.zoom_factor * 100)
+        return f"Zoom: {percent}%"
+
+    def _refresh_displayed_frame(self) -> None:
+        if self.last_frame is not None:
+            self._display_frame(self.last_frame)
+
+    def _target_display_size(self) -> QSize:
+        viewport_size = self.frame_scroll.viewport().size()
+        width = max(1, int(viewport_size.width() * self.zoom_factor))
+        height = max(1, int(viewport_size.height() * self.zoom_factor))
+        return QSize(width, height)
 
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)

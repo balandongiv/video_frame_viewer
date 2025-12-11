@@ -32,3 +32,8 @@ def placeholder_pixmap(target_size: QSize) -> QPixmap:
     pixmap = QPixmap(target_size)
     pixmap.fill(Qt.lightGray)
     return pixmap
+
+
+def seconds_to_frame_index(seconds: float, fps: float = 30.0) -> int:
+    """Convert seconds to a frame index using the provided sampling rate."""
+    return int(seconds * fps)
