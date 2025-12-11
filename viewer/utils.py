@@ -1,4 +1,5 @@
 """Utility helpers for the video viewer application."""
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -37,3 +38,8 @@ def placeholder_pixmap(target_size: QSize) -> QPixmap:
 def seconds_to_frame_index(seconds: float, fps: float = 30.0) -> int:
     """Convert seconds to a frame index using the provided sampling rate."""
     return int(seconds * fps)
+
+
+def is_md_mff_video(path: Path) -> bool:
+    """Return True if the path points to an MD.mff .mov video file."""
+    return path.suffix.lower() == ".mov" and "md.mff" in path.name.lower()

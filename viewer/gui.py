@@ -5,7 +5,6 @@ from typing import List, Optional
 from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtWidgets import (
     QApplication,
-    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -23,8 +22,53 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from viewer.utils import frame_to_pixmap, placeholder_pixmap, seconds_to_frame_index
+from viewer.utils import (
+    frame_to_pixmap,
+    is_md_mff_video,
+    placeholder_pixmap,
+    seconds_to_frame_index,
+)
 from viewer.video_handler import VideoHandler
+
+
+class PannableLabel(QLabel):
+    """QLabel that supports click-and-drag panning when larger than its viewport."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._scroll_area: Optional[QScrollArea] = None
+        self._dragging = False
+        self._drag_start_pos = None
+        self._h_start = 0
+        self._v_start = 0
+
+    def set_scroll_area(self, scroll_area: QScrollArea) -> None:
+        self._scroll_area = scroll_area
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton and self._scroll_area is not None:
+            self._dragging = True
+            self._drag_start_pos = event.pos()
+            self._h_start = self._scroll_area.horizontalScrollBar().value()
+            self._v_start = self._scroll_area.verticalScrollBar().value()
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._dragging and self._scroll_area is not None and self._drag_start_pos is not None:
+            delta = event.pos() - self._drag_start_pos
+            h_bar = self._scroll_area.horizontalScrollBar()
+            v_bar = self._scroll_area.verticalScrollBar()
+            h_bar.setValue(self._h_start - delta.x())
+            v_bar.setValue(self._v_start - delta.y())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            self._drag_start_pos = None
+            self.setCursor(Qt.ArrowCursor)
+        super().mouseReleaseEvent(event)
 
 
 class PreviewWidget(QWidget):
@@ -63,6 +107,7 @@ class PreviewWidget(QWidget):
 class VideoFrameViewer(QMainWindow):
     """Main window for browsing and navigating video frames."""
 
+    DATASET_ROOT = Path(r"D:\dataset\drowsy_driving_raja")
     SINGLE_STEP = 1
     JUMP_STEP = 10
     TIME_BASE_FPS = 30
@@ -82,6 +127,7 @@ class VideoFrameViewer(QMainWindow):
 
         self._setup_ui()
         self._update_navigation_state(False)
+        self._initialize_dataset_root()
 
     # UI setup
     def _setup_ui(self) -> None:
@@ -117,8 +163,10 @@ class VideoFrameViewer(QMainWindow):
         directory_group.setLayout(directory_layout)
 
         self.directory_input = QLineEdit()
+        self.directory_input.setReadOnly(True)
         browse_button = QPushButton("Browse")
-        scan_button = QPushButton("Scan for .mov files")
+        browse_button.setEnabled(False)
+        scan_button = QPushButton("Rescan")
 
         browse_button.clicked.connect(self._browse_directory)
         scan_button.clicked.connect(self._scan_directory)
@@ -178,7 +226,7 @@ class VideoFrameViewer(QMainWindow):
         self.preview_group.setLayout(preview_layout)
         layout.addWidget(self.preview_group)
 
-        self.frame_label = QLabel("Scan and select a video to view frames.")
+        self.frame_label = PannableLabel("Scan and select a video to view frames.")
         self.frame_label.setAlignment(Qt.AlignCenter)
         self.frame_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.frame_label.setMinimumSize(640, 360)
@@ -187,6 +235,7 @@ class VideoFrameViewer(QMainWindow):
         self.frame_scroll.setWidgetResizable(True)
         self.frame_scroll.setWidget(self.frame_label)
         self.frame_scroll.setAlignment(Qt.AlignCenter)
+        self.frame_label.set_scroll_area(self.frame_scroll)
 
         self.frame_info_label = QLabel("Frame: -")
         self.frame_info_label.setAlignment(Qt.AlignCenter)
@@ -203,11 +252,13 @@ class VideoFrameViewer(QMainWindow):
 
         self.frame_input = QLineEdit()
         self.frame_input.setPlaceholderText("Enter frame number (0-based)")
+        self.frame_input.returnPressed.connect(self._search_frame)
         self.search_button = QPushButton("Search")
         self.search_button.clicked.connect(self._search_frame)
 
         self.time_input = QLineEdit()
         self.time_input.setPlaceholderText("Enter time in seconds")
+        self.time_input.returnPressed.connect(self._search_time)
         self.time_search_button = QPushButton("Search Time")
         self.time_search_button.clicked.connect(self._search_time)
 
@@ -273,25 +324,23 @@ class VideoFrameViewer(QMainWindow):
 
     # Directory logic
     def _browse_directory(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Dataset Directory")
-        if directory:
-            self.directory_input.setText(directory)
+        self._set_status("Dataset root is fixed and cannot be changed.")
+
+    def _initialize_dataset_root(self) -> None:
+        self.directory_input.setText(str(self.DATASET_ROOT))
+        self._scan_directory()
 
     def _scan_directory(self) -> None:
-        root_text = self.directory_input.text().strip()
-        if not root_text:
-            self._set_status("Please enter or choose a root directory.")
-            return
+        root_path = self.DATASET_ROOT
+        self.directory_input.setText(str(root_path))
 
-        root_path = Path(root_text)
         if not root_path.exists():
-            self._set_status("The specified directory does not exist.")
+            self.video_list.clear()
+            self._set_status(f"Dataset root not found at {root_path}.")
             return
 
         self.video_paths = [
-            path
-            for path in root_path.rglob("*")
-            if path.is_file() and path.suffix.lower() == ".mov"
+            path for path in root_path.rglob("*.mov") if is_md_mff_video(path)
         ]
 
         self.video_list.clear()
@@ -300,9 +349,11 @@ class VideoFrameViewer(QMainWindow):
             self.video_list.addItem(item)
 
         if self.video_paths:
-            self._set_status(f"Found {len(self.video_paths)} .mov file(s). Select one to load.")
+            self._set_status(
+                f"Found {len(self.video_paths)} MD.mff .mov file(s) in the dataset root."
+            )
         else:
-            self._set_status("No .mov files found in the selected directory.")
+            self._set_status("No MD.mff .mov files found in the dataset root.")
 
     def _load_selected_video(self) -> None:
         selected_items = self.video_list.selectedItems()
