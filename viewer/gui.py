@@ -229,11 +229,11 @@ class VideoFrameViewer(QMainWindow):
 
         self.frame_label = PannableLabel("Scan and select a video to view frames.")
         self.frame_label.setAlignment(Qt.AlignCenter)
-        self.frame_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.frame_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.frame_label.setMinimumSize(640, 360)
 
         self.frame_scroll = QScrollArea()
-        self.frame_scroll.setWidgetResizable(True)
+        self.frame_scroll.setWidgetResizable(False)
         self.frame_scroll.setWidget(self.frame_label)
         self.frame_scroll.setAlignment(Qt.AlignCenter)
         self.frame_label.set_scroll_area(self.frame_scroll)
