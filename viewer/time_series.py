@@ -202,11 +202,6 @@ class TimeSeriesViewer(QWidget):
         if times is None:
             return
 
-        decimation = max(1, data.shape[1] // self.max_points)
-        if decimation > 1:
-            data = data[:, ::decimation]
-            times = times[::decimation]
-
         peak = np.nanmax(np.abs(data)) or 1.0
         spacing = peak * 2
         offsets = np.arange(data.shape[0]) * spacing
@@ -217,7 +212,6 @@ class TimeSeriesViewer(QWidget):
             curve = self.plot_widget.plot(
                 times, channel + offsets[idx], pen=self._pen_for_channel(channel_name, idx)
             )
-            curve.setDownsampling(auto=True, method="peak")
             self._plotted_curves.append(curve)
 
         self.cursor_line.show()
