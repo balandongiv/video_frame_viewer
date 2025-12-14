@@ -1,23 +1,99 @@
 """Time series loading and visualization helpers."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import mne
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtGui import QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QShortcut,
     QVBoxLayout,
     QWidget,
 )
+from viewer.utils import placeholder_pixmap
+
+ANNOTATION_MIN_DURATION = 0.001
+
+
+@dataclass
+class AnnotationSegment:
+    """Container for a single annotation interval."""
+
+    onset: float
+    duration: float
+    description: str
+
+    @property
+    def end(self) -> float:
+        return self.onset + self.duration
+
+
+def sanitize_annotation(
+    onset: float, duration: float, max_end: Optional[float] = None
+) -> Tuple[float, float]:
+    """Clamp an annotation interval to valid bounds.
+
+    Ensures onset is not negative, duration stays above the minimum, and the
+    annotation remains inside the optional ``max_end`` bound.
+    """
+
+    onset = max(0.0, onset)
+    duration = max(duration, ANNOTATION_MIN_DURATION)
+
+    if max_end is not None:
+        end = min(onset + duration, max_end)
+        onset = min(onset, max_end - ANNOTATION_MIN_DURATION)
+        duration = max(ANNOTATION_MIN_DURATION, end - onset)
+
+    return onset, duration
+
+
+def load_annotations_from_csv(csv_path: Path) -> List[AnnotationSegment]:
+    """Load annotations from a CSV file with onset, duration, description."""
+
+    if not csv_path.exists():
+        return []
+
+    segments: List[AnnotationSegment] = []
+    with csv_path.open("r", encoding="utf-8") as csv_file:
+        csv_file.readline()
+        for line in csv_file:
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 3:
+                continue
+            try:
+                onset = float(parts[0])
+                duration = float(parts[1])
+            except ValueError:
+                continue
+            description = parts[2]
+            segments.append(AnnotationSegment(onset, duration, description))
+
+    return segments
+
+
+def save_annotations_to_csv(csv_path: Path, annotations: List[AnnotationSegment]) -> None:
+    """Persist annotations to disk in MNE-compatible CSV format."""
+
+    with csv_path.open("w", encoding="utf-8") as csv_file:
+        csv_file.write("onset,duration,description\n")
+        for segment in annotations:
+            csv_file.write(
+                f"{segment.onset:.9f},{segment.duration:.9f},{segment.description}\n"
+            )
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
 PRIMARY_CHANNEL = "EEG-E8"
@@ -28,6 +104,14 @@ CHANNEL_PALETTE = [
     "#ef5350",
     "#b71c1c",
     "#f44336",
+]
+ANNOTATION_PALETTE = [
+    "#fff59d",
+    "#a5d6a7",
+    "#90caf9",
+    "#ffcc80",
+    "#ce93d8",
+    "#b0bec5",
 ]
 
 
@@ -85,6 +169,18 @@ class TimeSeriesViewer(QWidget):
         self.view_span_seconds: float = self.default_view_span_seconds
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
+        self.annotations: List[AnnotationSegment] = []
+        self.annotation_items: Dict[pg.LinearRegionItem, AnnotationSegment] = {}
+        self.annotation_labels: Dict[pg.LinearRegionItem, pg.TextItem] = {}
+        self._annotation_path: Optional[Path] = None
+        self._annotation_drag_start: Optional[float] = None
+        self._preview_region: Optional[pg.LinearRegionItem] = None
+        self._selected_region: Optional[pg.LinearRegionItem] = None
+        self._last_frame_pixmap = None
+        self._last_frame_time: float = 0.0
+        self._last_frame_index: Optional[int] = None
+        self.default_annotation_label = "HB_CL"
+        self._annotation_color_map: Dict[str, str] = {}
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -129,29 +225,103 @@ class TimeSeriesViewer(QWidget):
 
         self.status_label = QLabel("Load a video to view synchronized time series data.")
 
+        self.annotation_controls = self._build_annotation_controls()
+        self.frame_preview = self._build_frame_preview_panel()
+
         layout = QVBoxLayout()
         self.setLayout(layout)
 
         layout.addWidget(self.plot_widget)
+        layout.addWidget(self.annotation_controls)
+        layout.addWidget(self.frame_preview)
         layout.addWidget(self.status_label)
         layout.setStretch(0, 1)
         layout.setStretch(1, 0)
+        layout.setStretch(2, 0)
+        layout.setStretch(3, 0)
+
+        QShortcut(QKeySequence(Qt.Key_Delete), self, activated=self._delete_selected_annotation)
+        QShortcut(
+            QKeySequence(Qt.Key_Backspace), self, activated=self._delete_selected_annotation
+        )
+        self._update_annotation_buttons()
 
     def channel_controls(self) -> QWidget:
         """Expose the channel selection controls for external layouts."""
 
         return self._controls_container
 
+    def _build_annotation_controls(self) -> QWidget:
+        group = QGroupBox("Annotations")
+        layout = QHBoxLayout()
+        group.setLayout(layout)
+
+        self.annotation_edit_toggle = QCheckBox("Enable editing")
+        self.annotation_edit_toggle.setChecked(True)
+
+        layout.addWidget(QLabel("Label:"))
+        self.annotation_label_field = QLineEdit(self.default_annotation_label)
+        self.annotation_label_field.setMaximumWidth(120)
+        self.annotation_label_field.editingFinished.connect(self._update_default_label)
+        layout.addWidget(self.annotation_label_field)
+
+        self.annotation_status = QLabel(
+            "Click and drag on the plot to add annotations; drag edges to adjust."
+        )
+
+        self.delete_annotation_button = QPushButton("Delete selection")
+        self.delete_annotation_button.clicked.connect(self._delete_selected_annotation)
+        self.save_annotations_button = QPushButton("Save annotations")
+        self.save_annotations_button.clicked.connect(self._save_annotations)
+
+        layout.addWidget(self.annotation_edit_toggle)
+        layout.addWidget(self.delete_annotation_button)
+        layout.addWidget(self.save_annotations_button)
+        layout.addWidget(self.annotation_status)
+        layout.addStretch()
+        return group
+
+    def _build_frame_preview_panel(self) -> QWidget:
+        group = QGroupBox("Frame Comparison")
+        layout = QHBoxLayout()
+        group.setLayout(layout)
+
+        self.frame_preview_label = QLabel()
+        self.frame_preview_label.setAlignment(Qt.AlignCenter)
+        self.frame_preview_label.setFixedSize(240, 135)
+        self.frame_preview_label.setPixmap(
+            placeholder_pixmap(self.frame_preview_label.size())
+        )
+
+        info_layout = QVBoxLayout()
+        self.frame_time_label = QLabel("Time: - s")
+        self.frame_index_label = QLabel("Frame: -")
+        self.frame_description_label = QLabel(
+            "Scrub the time-series to keep this preview synchronized."
+        )
+        self.frame_description_label.setWordWrap(True)
+
+        info_layout.addWidget(self.frame_time_label)
+        info_layout.addWidget(self.frame_index_label)
+        info_layout.addWidget(self.frame_description_label)
+        info_layout.addStretch()
+
+        layout.addWidget(self.frame_preview_label)
+        layout.addLayout(info_layout)
+        return group
+
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""
 
         self._clear_plot()
+        self._clear_annotations()
         self._times = None
         self.raw = None
         self._selected_channels.clear()
         self.channel_list.clear()
         self._reset_zoom()
         self._last_ts_path = None
+        self._annotation_path = None
 
         if video_path is None:
             self.status_label.setText("Select a video to view its time series.")
@@ -173,10 +343,12 @@ class TimeSeriesViewer(QWidget):
 
         self.status_label.setText(f"Loaded time series from {ts_path}.")
         self._last_ts_path = ts_path
+        self._annotation_path = ts_path.with_suffix(".csv")
         self.raw = mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
         self._times = self.raw.times
         self._populate_channel_list()
         self._plot_data()
+        self._load_annotations()
         self._ensure_view_range(0.0)
 
     def update_cursor_time(self, seconds: float) -> None:
@@ -186,7 +358,10 @@ class TimeSeriesViewer(QWidget):
             self.cursor_line.hide()
             return
 
-        self._ensure_view_range(max(0.0, seconds))
+        clamped = max(0.0, seconds)
+        self._ensure_view_range(clamped)
+        self._last_frame_time = clamped
+        self._refresh_frame_preview()
 
     def _plot_data(self) -> None:
         if self.raw is None:
@@ -225,6 +400,32 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText(
             f"Displaying {len(picks)} of {total_channels} channel(s) from {self._last_ts_path}"
         )
+
+    def _load_annotations(self) -> None:
+        self._clear_annotations()
+        if self._annotation_path is None:
+            self.annotation_status.setText("Annotations: no file associated.")
+            self._update_annotation_buttons()
+            return
+
+        max_end = self._recording_end_time()
+        loaded = load_annotations_from_csv(self._annotation_path)
+        for segment in loaded:
+            onset, duration = sanitize_annotation(segment.onset, segment.duration, max_end)
+            self.annotations.append(
+                AnnotationSegment(onset=onset, duration=duration, description=segment.description)
+            )
+
+        for segment in self.annotations:
+            self._create_annotation_item(segment)
+
+        if loaded:
+            self.annotation_status.setText(
+                f"Loaded {len(self.annotations)} annotation(s) from {self._annotation_path.name}."
+            )
+        else:
+            self.annotation_status.setText("No annotations found; draw to add new ones.")
+        self._update_annotation_buttons()
 
     def _populate_channel_list(self) -> None:
         if self.raw is None:
@@ -343,6 +544,21 @@ class TimeSeriesViewer(QWidget):
         if hide_cursor:
             self.cursor_line.hide()
 
+    def _clear_annotations(self) -> None:
+        for region in list(self.annotation_items.keys()):
+            self.plot_widget.removeItem(region)
+        for label in list(self.annotation_labels.values()):
+            self.plot_widget.removeItem(label)
+        if self._preview_region:
+            self.plot_widget.removeItem(self._preview_region)
+        self.annotations.clear()
+        self.annotation_items.clear()
+        self.annotation_labels.clear()
+        self._preview_region = None
+        self._selected_region = None
+        self._annotation_color_map.clear()
+        self._update_annotation_buttons()
+
     def _pen_for_channel(self, channel_name: str, index: int) -> pg.Pen:
         if channel_name == PRIMARY_CHANNEL:
             return pg.mkPen(CHANNEL_PALETTE[0], width=1.5)
@@ -351,16 +567,36 @@ class TimeSeriesViewer(QWidget):
         return pg.mkPen(CHANNEL_PALETTE[palette_index], width=1)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        if (
-            obj is self.plot_widget.viewport()
-            and event.type() == QEvent.Wheel
-            and event.modifiers() & Qt.ControlModifier
-        ):
-            delta = event.angleDelta().y()
-            multiplier = 0.8 if delta > 0 else 1.25
-            anchor_time = self._time_at_position(event.pos())
-            self._adjust_zoom(multiplier, anchor_time=anchor_time)
-            return True
+        if obj is self.plot_widget.viewport():
+            if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                multiplier = 0.8 if delta > 0 else 1.25
+                anchor_time = self._time_at_position(event.pos())
+                self._adjust_zoom(multiplier, anchor_time=anchor_time)
+                return True
+
+            if self.annotation_edit_toggle.isChecked() and self.raw is not None:
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    time_point = self._time_at_position(event.pos())
+                    if time_point is not None:
+                        self._start_annotation_drag(time_point)
+                        return True
+                if event.type() == QEvent.MouseMove and self._annotation_drag_start is not None:
+                    time_point = self._time_at_position(event.pos())
+                    if time_point is not None:
+                        self._update_preview_region(time_point)
+                        return True
+                if (
+                    event.type() == QEvent.MouseButtonRelease
+                    and event.button() == Qt.LeftButton
+                    and self._annotation_drag_start is not None
+                ):
+                    time_point = self._time_at_position(event.pos())
+                    if time_point is not None:
+                        self._finish_annotation_drag(time_point)
+                    self._clear_preview_region()
+                    self._annotation_drag_start = None
+                    return True
 
         return super().eventFilter(obj, event)
 
@@ -372,3 +608,195 @@ class TimeSeriesViewer(QWidget):
         scene_pos = self.plot_widget.mapToScene(pos)
         view_pos = view_box.mapSceneToView(scene_pos)
         return view_pos.x()
+
+    def _start_annotation_drag(self, time_point: float) -> None:
+        self._annotation_drag_start = time_point
+        if self._preview_region is None:
+            self._preview_region = pg.LinearRegionItem(movable=False)
+            self._preview_region.setBrush(pg.mkBrush(50, 150, 255, 80))
+            self._preview_region.setZValue(5)
+            self.plot_widget.addItem(self._preview_region)
+        self._update_preview_region(time_point)
+
+    def _update_preview_region(self, current_time: float) -> None:
+        if self._preview_region is None or self._annotation_drag_start is None:
+            return
+        start = self._annotation_drag_start
+        self._preview_region.setRegion((min(start, current_time), max(start, current_time)))
+
+    def _finish_annotation_drag(self, end_time: float) -> None:
+        if self._annotation_drag_start is None:
+            return
+        start = self._annotation_drag_start
+        if end_time == start:
+            return
+
+        onset = min(start, end_time)
+        duration = abs(end_time - start)
+        max_end = self._recording_end_time()
+        onset, duration = sanitize_annotation(onset, duration, max_end)
+        description = self._current_annotation_label()
+        segment = AnnotationSegment(onset=onset, duration=duration, description=description)
+        self.annotations.append(segment)
+        self._create_annotation_item(segment)
+        self.annotation_status.setText(
+            f"Added annotation at {onset:.3f}s for {duration:.3f}s as '{description}'."
+        )
+        self._update_annotation_buttons()
+
+    def _clear_preview_region(self) -> None:
+        if self._preview_region:
+            self.plot_widget.removeItem(self._preview_region)
+        self._preview_region = None
+
+    def _current_annotation_label(self) -> str:
+        text = self.annotation_label_field.text().strip()
+        if text:
+            self.default_annotation_label = text
+        return self.default_annotation_label
+
+    def _annotation_color(self, description: str) -> str:
+        if description not in self._annotation_color_map:
+            index = len(self._annotation_color_map) % len(ANNOTATION_PALETTE)
+            self._annotation_color_map[description] = ANNOTATION_PALETTE[index]
+        return self._annotation_color_map[description]
+
+    def _annotation_brush(self, color_name: str) -> pg.Brush:
+        color = pg.mkColor(color_name)
+        color.setAlpha(80)
+        return pg.mkBrush(color)
+
+    def _create_annotation_item(self, segment: AnnotationSegment) -> None:
+        region = pg.LinearRegionItem(values=(segment.onset, segment.end), movable=True)
+        brush = self._annotation_brush(self._annotation_color(segment.description))
+        region.setBrush(brush)
+        region.setZValue(10)
+        region.sigRegionChangeStarted.connect(lambda: self._select_region(region))
+        region.sigRegionChangeFinished.connect(lambda: self._on_region_changed(region))
+        region.sigRegionChanged.connect(lambda: self._update_annotation_label_position(region))
+        self.annotation_items[region] = segment
+        self.plot_widget.addItem(region)
+
+        label = pg.TextItem(segment.description, anchor=(0.5, 1.0), color="k")
+        self.annotation_labels[region] = label
+        self.plot_widget.addItem(label)
+        self._update_annotation_label_position(region)
+        self._refresh_region_styles()
+
+    def _select_region(self, region: Optional[pg.LinearRegionItem]) -> None:
+        if region is self._selected_region:
+            return
+        self._selected_region = region
+        self._refresh_region_styles()
+        self._update_annotation_buttons()
+
+    def _refresh_region_styles(self) -> None:
+        for region, segment in self.annotation_items.items():
+            color = self._annotation_color(segment.description)
+            width = 3 if region is self._selected_region else 1.5
+            region.setPen(pg.mkPen(color, width=width))
+            region.setBrush(self._annotation_brush(color))
+            region.setZValue(15 if region is self._selected_region else 10)
+
+    def _update_annotation_label_position(self, region: pg.LinearRegionItem) -> None:
+        label = self.annotation_labels.get(region)
+        if label is None:
+            return
+        min_x, max_x = region.getRegion()
+        center_x = (min_x + max_x) / 2
+        view_range = self.plot_widget.viewRange()
+        if not view_range or len(view_range) < 2:
+            return
+        _, (y_min, y_max) = view_range
+        label_y = y_max - (y_max - y_min) * 0.05
+        label.setPos(center_x, label_y)
+
+    def _on_region_changed(self, region: pg.LinearRegionItem) -> None:
+        segment = self.annotation_items.get(region)
+        if segment is None:
+            return
+        start, end = region.getRegion()
+        onset, duration = sanitize_annotation(start, end - start, self._recording_end_time())
+        segment.onset = onset
+        segment.duration = duration
+        region.setRegion((onset, onset + duration))
+        self._update_annotation_label_position(region)
+        self.annotation_status.setText(
+            f"Updated '{segment.description}' to {onset:.3f}s – {onset + duration:.3f}s."
+        )
+        self._select_region(region)
+
+    def _delete_selected_annotation(self) -> None:
+        if self._selected_region is None:
+            return
+        segment = self.annotation_items.pop(self._selected_region, None)
+        label = self.annotation_labels.pop(self._selected_region, None)
+        if segment in self.annotations:
+            self.annotations.remove(segment)
+        self.plot_widget.removeItem(self._selected_region)
+        if label:
+            self.plot_widget.removeItem(label)
+        self._selected_region = None
+        self.annotation_status.setText("Annotation removed.")
+        self._update_annotation_buttons()
+
+    def _save_annotations(self) -> None:
+        if self._annotation_path is None:
+            self.annotation_status.setText("No annotation file available to save.")
+            return
+
+        max_end = self._recording_end_time()
+        sanitized: List[AnnotationSegment] = []
+        for segment in self.annotations:
+            onset, duration = sanitize_annotation(segment.onset, segment.duration, max_end)
+            segment.onset = onset
+            segment.duration = duration
+            sanitized.append(
+                AnnotationSegment(onset=onset, duration=duration, description=segment.description)
+            )
+
+        save_annotations_to_csv(self._annotation_path, sanitized)
+        self.annotation_status.setText(
+            f"Saved {len(sanitized)} annotation(s) to {self._annotation_path.name}."
+        )
+
+    def _update_default_label(self) -> None:
+        text = self.annotation_label_field.text().strip()
+        if text:
+            self.default_annotation_label = text
+        else:
+            self.annotation_label_field.setText(self.default_annotation_label)
+
+    def _update_annotation_buttons(self) -> None:
+        self.delete_annotation_button.setEnabled(self._selected_region is not None)
+        self.save_annotations_button.setEnabled(bool(self.annotations))
+
+    def _recording_end_time(self) -> Optional[float]:
+        if self._times is None or self._times.size == 0:
+            return None
+        return float(self._times[-1])
+
+    def update_frame_reference(
+        self, seconds: float, pixmap: Optional[QPixmap] = None, frame_index: Optional[int] = None
+    ) -> None:
+        """Update the frame comparison panel with synchronized context."""
+
+        if pixmap is not None:
+            scaled = pixmap.scaled(
+                self.frame_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self._last_frame_pixmap = scaled
+        if frame_index is not None:
+            self._last_frame_index = frame_index
+        self._last_frame_time = max(0.0, seconds)
+        self._refresh_frame_preview()
+
+    def _refresh_frame_preview(self) -> None:
+        pixmap = self._last_frame_pixmap or placeholder_pixmap(self.frame_preview_label.size())
+        self.frame_preview_label.setPixmap(pixmap)
+        self.frame_time_label.setText(f"Time: {self._last_frame_time:.3f} s")
+        frame_text = "-" if self._last_frame_index is None else str(self._last_frame_index)
+        self.frame_index_label.setText(f"Frame: {frame_text}")
+        self.frame_description_label.setText(
+            "Use the time-series cursor to keep this preview aligned with annotations."
+        )

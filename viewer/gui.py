@@ -664,6 +664,9 @@ class VideoFrameViewer(QMainWindow):
         self.last_frame = frame
         self.frame_label.setPixmap(pixmap)
         self.frame_label.resize(pixmap.size())
+        self.time_series_viewer.update_frame_reference(
+            self._synced_time_seconds(), pixmap=pixmap, frame_index=self.current_frame_index
+        )
 
     def _update_frame_label(self) -> None:
         if self.video_handler.frame_count:
