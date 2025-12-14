@@ -333,7 +333,7 @@ class TimeSeriesViewer(QWidget):
 
         self.status_label.setText(f"Loaded time series from {ts_path}.")
         self._last_ts_path = ts_path
-        self._annotation_path = ts_path.with_suffix(".csv")
+        self._annotation_path = self._resolve_annotation_path(ts_path, video_path)
         self.raw = mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
         self._times = self.raw.times
         self._populate_channel_list()
@@ -362,6 +362,20 @@ class TimeSeriesViewer(QWidget):
                 return ts_path
 
         return None
+
+    def _resolve_annotation_path(self, ts_path: Path, video_path: Optional[Path]) -> Path:
+        """Pick an annotation CSV path near the resolved time series or video."""
+
+        candidates: List[Path] = [ts_path.with_suffix(".csv")]
+        if video_path is not None:
+            candidates.append(video_path.parent / "ear_eog.csv")
+        candidates.append(Path.cwd() / "ear_eog.csv")
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        return candidates[0]
 
     def update_cursor_time(self, seconds: float) -> None:
         """Keep the current time centered under a fixed cursor."""
@@ -428,13 +442,19 @@ class TimeSeriesViewer(QWidget):
                 AnnotationSegment(onset=onset, duration=duration, description=segment.description)
             )
 
+        first_region: Optional[pg.LinearRegionItem] = None
         for segment in self.annotations:
-            self._create_annotation_item(segment)
+            region = self._create_annotation_item(segment)
+            if first_region is None:
+                first_region = region
 
         if loaded:
             self.annotation_status.setText(
                 f"Loaded {len(self.annotations)} annotation(s) from {self._annotation_path.name}."
             )
+            if first_region is not None:
+                self._select_region(first_region)
+                self._ensure_view_range(first_region.getRegion()[0])
         else:
             self.annotation_status.setText("No annotations found; draw to add new ones.")
         self._update_annotation_buttons()
@@ -650,7 +670,8 @@ class TimeSeriesViewer(QWidget):
         description = self._current_annotation_label()
         segment = AnnotationSegment(onset=onset, duration=duration, description=description)
         self.annotations.append(segment)
-        self._create_annotation_item(segment)
+        region = self._create_annotation_item(segment)
+        self._select_region(region)
         self.annotation_status.setText(
             f"Added annotation at {onset:.3f}s for {duration:.3f}s as '{description}'."
         )
@@ -678,7 +699,7 @@ class TimeSeriesViewer(QWidget):
         color.setAlpha(80)
         return pg.mkBrush(color)
 
-    def _create_annotation_item(self, segment: AnnotationSegment) -> None:
+    def _create_annotation_item(self, segment: AnnotationSegment) -> pg.LinearRegionItem:
         region = pg.LinearRegionItem(values=(segment.onset, segment.end), movable=True)
         brush = self._annotation_brush(self._annotation_color(segment.description))
         region.setBrush(brush)
@@ -694,6 +715,7 @@ class TimeSeriesViewer(QWidget):
         self.plot_widget.addItem(label)
         self._update_annotation_label_position(region)
         self._refresh_region_styles()
+        return region
 
     def _select_region(self, region: Optional[pg.LinearRegionItem]) -> None:
         if region is self._selected_region:
