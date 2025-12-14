@@ -323,20 +323,10 @@ class TimeSeriesViewer(QWidget):
         self._last_ts_path = None
         self._annotation_path = None
 
-        if video_path is None:
-            self.status_label.setText("Select a video to view its time series.")
-            self.cursor_line.hide()
-            return
-
-        try:
-            ts_path = derive_time_series_path(video_path)
-        except ValueError as exc:  # pragma: no cover - guardrails for unexpected paths
-            self.status_label.setText(str(exc))
-            self.cursor_line.hide()
-            return
-        if not ts_path.exists():
+        ts_path = self._resolve_time_series_path(video_path)
+        if ts_path is None:
             self.status_label.setText(
-                f"Time series file not found at {ts_path}."
+                "Select a video to view its time series or place ear_eog.fif next to ear_eog.csv."
             )
             self.cursor_line.hide()
             return
@@ -350,6 +340,28 @@ class TimeSeriesViewer(QWidget):
         self._plot_data()
         self._load_annotations()
         self._ensure_view_range(0.0)
+
+    def _resolve_time_series_path(self, video_path: Optional[Path]) -> Optional[Path]:
+        """Find a usable ear_eog.fif path and its neighboring CSV annotations."""
+
+        candidates: List[Path] = []
+
+        if video_path is not None:
+            try:
+                candidates.append(derive_time_series_path(video_path))
+            except ValueError:
+                pass
+
+            if video_path.is_file():
+                candidates.append(video_path.parent / "ear_eog.fif")
+
+        candidates.append(Path.cwd() / "ear_eog.fif")
+
+        for ts_path in candidates:
+            if ts_path.exists():
+                return ts_path
+
+        return None
 
     def update_cursor_time(self, seconds: float) -> None:
         """Keep the current time centered under a fixed cursor."""
