@@ -2,22 +2,45 @@
 from __future__ import annotations
 
 from pathlib import Path, PureWindowsPath
-from typing import List, Optional, Set
+from typing import List, Optional, Set, TYPE_CHECKING
 
 import mne
 import numpy as np
-import pyqtgraph as pg
-from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtWidgets import (
-    QCheckBox,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+
+if TYPE_CHECKING:
+    import pyqtgraph as pg
+    from PyQt5.QtCore import QEvent, Qt
+    from PyQt5.QtWidgets import (
+        QCheckBox,
+        QHBoxLayout,
+        QLabel,
+        QListWidget,
+        QListWidgetItem,
+        QPushButton,
+        QVBoxLayout,
+        QWidget,
+    )
+try:
+    import pyqtgraph as pg
+    from PyQt5.QtCore import QEvent, Qt
+    from PyQt5.QtWidgets import (
+        QCheckBox,
+        QHBoxLayout,
+        QLabel,
+        QListWidget,
+        QListWidgetItem,
+        QPushButton,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    _QT_AVAILABLE = True
+except Exception:  # pragma: no cover - used only in headless test environments
+    pg = None
+    QEvent = None
+    Qt = None
+    QCheckBox = QLabel = QListWidget = QListWidgetItem = QPushButton = QVBoxLayout = QHBoxLayout = QWidget = object  # type: ignore[assignment]
+    _QT_AVAILABLE = False
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
 PRIMARY_CHANNEL = "EEG-E8"
@@ -74,6 +97,8 @@ class TimeSeriesViewer(QWidget):
     """Widget that renders time series data alongside the video frames."""
 
     def __init__(self, max_points: int = 10000, parent: Optional[QWidget] = None) -> None:
+        if not _QT_AVAILABLE:
+            raise ImportError("PyQt5 and pyqtgraph are required to use TimeSeriesViewer.")
         super().__init__(parent)
         self.max_points = max_points
         self.raw: Optional[mne.io.BaseRaw] = None

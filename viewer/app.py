@@ -3,12 +3,12 @@ import sys
 
 from PyQt5.QtWidgets import QApplication
 
-from viewer.gui import VideoFrameViewer
+from viewer.annotation_editor import AnnotationEditorWindow
 
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = VideoFrameViewer()
+    window = AnnotationEditorWindow()
     window.show()
     sys.exit(app.exec_())
 
