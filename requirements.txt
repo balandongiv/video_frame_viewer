@@ -1,5 +1,5 @@
 PyQt5
-opencv-python
+opencv-python-headless
 numpy
 pyqtgraph
 mne
