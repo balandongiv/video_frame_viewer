@@ -136,6 +136,7 @@ class VideoFrameViewer(QMainWindow):
         self.zoom_factor: float = 1.0
         self.last_frame = None
         self.time_series_viewer = TimeSeriesViewer()
+        self.time_series_viewer.cursor_time_changed.connect(self._sync_frame_to_time)
 
         self._setup_ui()
         self._setup_shortcuts()
@@ -701,6 +702,15 @@ class VideoFrameViewer(QMainWindow):
 
     def _update_time_series_cursor(self) -> None:
         self.time_series_viewer.update_cursor_time(self._synced_time_seconds())
+
+    def _sync_frame_to_time(self, synced_seconds: float) -> None:
+        if not self.video_handler.capture:
+            return
+
+        fps = self.video_handler.fps or self.TIME_BASE_FPS
+        base_seconds = max(0.0, synced_seconds - self.sync_offset_seconds)
+        target_frame = seconds_to_frame_index(base_seconds, fps)
+        self._goto_frame(target_frame, show_status=False)
 
     def _update_previews(self) -> None:
         if self.video_handler.frame_count <= 0:

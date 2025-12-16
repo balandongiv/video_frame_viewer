@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path, PureWindowsPath
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 import mne
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -15,8 +15,17 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
+)
+
+from viewer.annotations import (
+    AnnotationEntry,
+    clamp_entry,
+    load_annotations,
+    save_annotations,
+    validate_annotations,
 )
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
@@ -73,6 +82,8 @@ def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_R
 class TimeSeriesViewer(QWidget):
     """Widget that renders time series data alongside the video frames."""
 
+    cursor_time_changed = pyqtSignal(float)
+
     def __init__(self, max_points: int = 10000, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.max_points = max_points
@@ -85,6 +96,17 @@ class TimeSeriesViewer(QWidget):
         self.view_span_seconds: float = self.default_view_span_seconds
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
+        self._annotation_file: Optional[Path] = None
+        self._annotation_entries: Dict[str, AnnotationEntry] = {}
+        self._annotation_regions: Dict[str, pg.LinearRegionItem] = {}
+        self._annotation_labels: Dict[str, pg.TextItem] = {}
+        self._next_annotation_id: int = 1
+        self._selected_annotation: Optional[str] = None
+        self._annotation_drag_start: Optional[float] = None
+        self._suppress_cursor_signal: bool = False
+        self._default_label = "HB_CL"
+        self._last_used_label = self._default_label
+        self._min_annotation_duration = 0.05
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -115,13 +137,31 @@ class TimeSeriesViewer(QWidget):
 
         control_layout.addLayout(control_row)
         control_layout.addWidget(self.channel_list)
+
+        annotation_row = QHBoxLayout()
+        self.annotation_label_input = QLineEdit(self._default_label)
+        self.annotation_label_input.setPlaceholderText("Annotation label")
+        self.annotation_label_input.setClearButtonEnabled(True)
+        self.save_annotations_button = QPushButton("Save Annotations")
+        self.save_annotations_button.clicked.connect(self._save_annotations)
+
+        annotation_row.addWidget(QLabel("Label:"))
+        annotation_row.addWidget(self.annotation_label_input)
+        annotation_row.addWidget(self.save_annotations_button)
+
+        control_layout.addLayout(annotation_row)
         self._controls_container.setLayout(control_layout)
 
         self.plot_widget = pg.PlotWidget(background="w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel("bottom", "Time", units="s")
         self.plot_widget.setLabel("left", "Channels")
+        self.plot_widget.setFocusPolicy(Qt.StrongFocus)
         self.plot_widget.viewport().installEventFilter(self)
+        self.plot_widget.installEventFilter(self)
+        self.plot_widget.getPlotItem().sigRangeChanged.connect(
+            lambda *_: self._refresh_annotation_labels()
+        )
 
         self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("r", width=2))
         self.plot_widget.addItem(self.cursor_line)
@@ -133,14 +173,23 @@ class TimeSeriesViewer(QWidget):
         self.setLayout(layout)
 
         layout.addWidget(self.plot_widget)
+        layout.addWidget(self._build_annotation_hint())
         layout.addWidget(self.status_label)
         layout.setStretch(0, 1)
         layout.setStretch(1, 0)
+        layout.setStretch(2, 0)
 
     def channel_controls(self) -> QWidget:
         """Expose the channel selection controls for external layouts."""
 
         return self._controls_container
+
+    def _build_annotation_hint(self) -> QWidget:
+        hint = QLabel(
+            "Click and drag to add an annotation. Click to select, press Delete to remove."
+        )
+        hint.setWordWrap(True)
+        return hint
 
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""
@@ -152,6 +201,8 @@ class TimeSeriesViewer(QWidget):
         self.channel_list.clear()
         self._reset_zoom()
         self._last_ts_path = None
+        self._annotation_file = None
+        self._clear_annotations()
 
         if video_path is None:
             self.status_label.setText("Select a video to view its time series.")
@@ -178,6 +229,7 @@ class TimeSeriesViewer(QWidget):
         self._populate_channel_list()
         self._plot_data()
         self._ensure_view_range(0.0)
+        self._load_annotations(ts_path.with_name("ear_eog.csv"))
 
     def update_cursor_time(self, seconds: float) -> None:
         """Keep the current time centered under a fixed cursor."""
@@ -186,7 +238,9 @@ class TimeSeriesViewer(QWidget):
             self.cursor_line.hide()
             return
 
+        self._suppress_cursor_signal = True
         self._ensure_view_range(max(0.0, seconds))
+        self._suppress_cursor_signal = False
 
     def _plot_data(self) -> None:
         if self.raw is None:
@@ -304,7 +358,7 @@ class TimeSeriesViewer(QWidget):
     def _zoom_label_text(self) -> str:
         return f"Zoom window: {self.view_span_seconds:.2f}s"
 
-    def _ensure_view_range(self, target_time: float) -> None:
+    def _ensure_view_range(self, target_time: float, *, from_user: bool = False) -> None:
         if self._times is None or self._times.size == 0:
             return
 
@@ -328,6 +382,8 @@ class TimeSeriesViewer(QWidget):
         self.cursor_line.setPos(center)
         self.cursor_line.show()
         self.plot_widget.enableAutoRange(y=True)
+        if from_user and not self._suppress_cursor_signal:
+            self.cursor_time_changed.emit(self._last_cursor_time)
 
     def _max_span_seconds(self) -> float:
         if self._times is None or self._times.size == 0:
@@ -342,6 +398,7 @@ class TimeSeriesViewer(QWidget):
         self.plot_widget.enableAutoRange()
         if hide_cursor:
             self.cursor_line.hide()
+        self._refresh_annotation_labels()
 
     def _pen_for_channel(self, channel_name: str, index: int) -> pg.Pen:
         if channel_name == PRIMARY_CHANNEL:
@@ -351,16 +408,31 @@ class TimeSeriesViewer(QWidget):
         return pg.mkPen(CHANNEL_PALETTE[palette_index], width=1)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        if (
-            obj is self.plot_widget.viewport()
-            and event.type() == QEvent.Wheel
-            and event.modifiers() & Qt.ControlModifier
-        ):
-            delta = event.angleDelta().y()
-            multiplier = 0.8 if delta > 0 else 1.25
-            anchor_time = self._time_at_position(event.pos())
-            self._adjust_zoom(multiplier, anchor_time=anchor_time)
-            return True
+        if obj is self.plot_widget.viewport():
+            if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                multiplier = 0.8 if delta > 0 else 1.25
+                anchor_time = self._time_at_position(event.pos())
+                self._adjust_zoom(multiplier, anchor_time=anchor_time)
+                return True
+
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                clicked_time = self._time_at_position(event.pos())
+                self._annotation_drag_start = clicked_time
+                self.plot_widget.setFocus()
+                if clicked_time is not None:
+                    self._update_cursor_time_from_user(clicked_time)
+                return True
+
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                end_time = self._time_at_position(event.pos())
+                self._handle_annotation_mouse_release(end_time)
+                return True
+
+        if obj is self.plot_widget and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                self._delete_selected_annotation()
+                return True
 
         return super().eventFilter(obj, event)
 
@@ -372,3 +444,215 @@ class TimeSeriesViewer(QWidget):
         scene_pos = self.plot_widget.mapToScene(pos)
         view_pos = view_box.mapSceneToView(scene_pos)
         return view_pos.x()
+
+    # Annotation handling
+    def _load_annotations(self, csv_path: Path) -> None:
+        self._annotation_file = csv_path
+        self._clear_annotations()
+
+        if self._times is None or self._times.size == 0:
+            return
+
+        try:
+            entries = load_annotations(csv_path)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+
+        max_time = float(self._times[-1])
+        clamped_entries = [clamp_entry(entry, max_time) for entry in entries]
+        for entry in clamped_entries:
+            self._add_annotation(entry)
+
+        if clamped_entries:
+            self.status_label.setText(
+                f"Loaded {len(clamped_entries)} annotation(s) from {csv_path}."
+            )
+        else:
+            self.status_label.setText("No annotations found. Drag on the plot to add one.")
+
+    def _clear_annotations(self) -> None:
+        for region in self._annotation_regions.values():
+            self.plot_widget.removeItem(region)
+        for label in self._annotation_labels.values():
+            self.plot_widget.removeItem(label)
+        self._annotation_entries.clear()
+        self._annotation_regions.clear()
+        self._annotation_labels.clear()
+        self._next_annotation_id = 1
+        self._selected_annotation = None
+
+    def _add_annotation(self, entry: AnnotationEntry) -> str:
+        annotation_id = f"annotation-{self._next_annotation_id}"
+        self._next_annotation_id += 1
+        self._annotation_entries[annotation_id] = entry
+
+        region = pg.LinearRegionItem(
+            values=(entry.onset, entry.end),
+            brush=pg.mkBrush(self._annotation_color_for_label(entry.description, alpha=60)),
+            movable=True,
+        )
+        region.setZValue(2)
+        region.sigRegionChangeFinished.connect(
+            lambda _: self._on_region_change_finished(annotation_id)
+        )
+        region.sigRegionChangeStarted.connect(lambda _: self._select_annotation(annotation_id))
+        self.plot_widget.addItem(region)
+        self._annotation_regions[annotation_id] = region
+
+        label_item = pg.TextItem(
+            entry.description,
+            anchor=(0.5, 1.0),
+            fill=pg.mkBrush(255, 255, 255, 180),
+        )
+        label_item.setZValue(3)
+        self.plot_widget.addItem(label_item)
+        self._annotation_labels[annotation_id] = label_item
+        self._position_annotation_label(annotation_id)
+        self._select_annotation(annotation_id)
+        return annotation_id
+
+    def _annotation_color_for_label(self, label: str, alpha: int = 120):
+        palette = CHANNEL_PALETTE or ["#00838f", "#43a047", "#6a1b9a", "#ffb300"]
+        index = abs(hash(label)) % len(palette)
+        color = pg.mkColor(palette[index])
+        color.setAlpha(alpha)
+        return color
+
+    def _position_annotation_label(self, annotation_id: str) -> None:
+        label_item = self._annotation_labels.get(annotation_id)
+        region = self._annotation_regions.get(annotation_id)
+        if not label_item or not region:
+            return
+
+        center_time = sum(region.getRegion()) / 2
+        y_range = self.plot_widget.viewRange()[1]
+        y_pos = y_range[1] if y_range else 0.0
+        label_item.setPos(center_time, y_pos)
+
+    def _refresh_annotation_labels(self) -> None:
+        for annotation_id in list(self._annotation_labels.keys()):
+            self._position_annotation_label(annotation_id)
+
+    def _on_region_change_finished(self, annotation_id: str) -> None:
+        if self._times is None or self._times.size == 0:
+            return
+
+        entry = self._annotation_entries.get(annotation_id)
+        region = self._annotation_regions.get(annotation_id)
+        if entry is None or region is None:
+            return
+
+        start, end = sorted(region.getRegion())
+        max_time = float(self._times[-1])
+        bounded_start = max(0.0, min(start, max_time))
+        bounded_end = max(bounded_start + self._min_annotation_duration, min(end, max_time))
+
+        region.setRegion((bounded_start, bounded_end))
+        self._annotation_entries[annotation_id] = AnnotationEntry(
+            onset=bounded_start,
+            duration=bounded_end - bounded_start,
+            description=entry.description,
+        )
+        self._position_annotation_label(annotation_id)
+
+    def _select_annotation(self, annotation_id: Optional[str]) -> None:
+        for key, region in self._annotation_regions.items():
+            width = 2.5 if key == annotation_id else 1.5
+            region.setPen(pg.mkPen("k", width=width))
+        self._selected_annotation = annotation_id
+
+    def _handle_annotation_mouse_release(self, end_time: Optional[float]) -> None:
+        start_time = self._annotation_drag_start
+        self._annotation_drag_start = None
+
+        if end_time is None or start_time is None:
+            return
+
+        if self._times is None or self._times.size == 0:
+            return
+
+        max_time = float(self._times[-1])
+        span = abs(end_time - start_time)
+        if span < self._min_annotation_duration:
+            self._select_annotation_at_time(end_time)
+            self._update_cursor_time_from_user(end_time)
+            return
+
+        onset = max(0.0, min(start_time, end_time))
+        duration = max(self._min_annotation_duration, min(max_time - onset, span))
+        new_entry = AnnotationEntry(
+            onset=onset,
+            duration=duration,
+            description=self._current_annotation_label(),
+        )
+        try:
+            clamped = clamp_entry(new_entry, max_time)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+
+        self._add_annotation(clamped)
+        self._last_used_label = clamped.description
+        self.status_label.setText(
+            f"Added annotation '{clamped.description}' at {clamped.onset:.3f}s for {clamped.duration:.3f}s."
+        )
+
+    def _current_annotation_label(self) -> str:
+        text = self.annotation_label_input.text().strip()
+        if text:
+            return text
+        return self._last_used_label
+
+    def _select_annotation_at_time(self, target_time: float) -> None:
+        candidates = []
+        for annotation_id, entry in self._annotation_entries.items():
+            if entry.onset <= target_time <= entry.end:
+                candidates.append((entry.onset, annotation_id))
+        if not candidates:
+            self._select_annotation(None)
+            return
+
+        _, annotation_id = min(candidates, key=lambda item: item[0])
+        self._select_annotation(annotation_id)
+
+    def _delete_selected_annotation(self) -> None:
+        annotation_id = getattr(self, "_selected_annotation", None)
+        if not annotation_id:
+            return
+
+        region = self._annotation_regions.pop(annotation_id, None)
+        label = self._annotation_labels.pop(annotation_id, None)
+        self._annotation_entries.pop(annotation_id, None)
+        if region:
+            self.plot_widget.removeItem(region)
+        if label:
+            self.plot_widget.removeItem(label)
+        self._selected_annotation = None
+        self.status_label.setText("Annotation deleted.")
+
+    def _save_annotations(self) -> None:
+        if self._times is None or self._times.size == 0:
+            self.status_label.setText("Load a time series before saving annotations.")
+            return
+
+        if not self._annotation_file:
+            self.status_label.setText("No annotation file target available.")
+            return
+
+        max_time = float(self._times[-1])
+        entries = list(self._annotation_entries.values())
+        try:
+            validated = validate_annotations(entries, max_time)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+
+        save_annotations(self._annotation_file, sorted(validated, key=lambda entry: entry.onset))
+        self.status_label.setText(f"Saved {len(validated)} annotation(s) to {self._annotation_file}.")
+
+    def _update_cursor_time_from_user(self, seconds: float) -> None:
+        clamped = seconds
+        if self._times is not None and self._times.size > 0:
+            clamped = max(0.0, min(seconds, float(self._times[-1])))
+        self._ensure_view_range(clamped, from_user=True)

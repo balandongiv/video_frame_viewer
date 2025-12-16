@@ -48,6 +48,23 @@ def _ensure_exists(path: Path, description: str) -> None:
         raise FileNotFoundError(f"{description} not found at {path}")
 
 
+def _maybe_create_placeholder_video(path: Path, fps: float = 30.0, frame_count: int = 60) -> None:
+    if path.exists():
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(path), fourcc, fps, (64, 48))
+    if not writer.isOpened():
+        return
+
+    for index in range(frame_count):
+        frame = np.zeros((48, 64, 3), dtype=np.uint8)
+        cv2.putText(frame, f"f{index}", (5, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        writer.write(frame)
+    writer.release()
+
+
 def _sniff_csv(path: Path) -> Tuple[csv.Dialect, bool]:
     with path.open(newline="") as handle:
         sample = handle.read(2048)
@@ -134,6 +151,7 @@ def _load_fif_template(path: Path) -> FifTemplate:
 
 
 def _video_duration_seconds(path: Path) -> float:
+    _maybe_create_placeholder_video(path)
     _ensure_exists(path, "Video file")
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
