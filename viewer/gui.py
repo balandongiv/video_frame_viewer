@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QCheckBox,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -27,7 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from viewer.time_series import TimeSeriesViewer
+from viewer.time_series import PROCESSED_ROOT, TimeSeriesViewer
 from viewer.utils import (
     frame_to_pixmap,
     find_md_mff_videos,
@@ -135,6 +136,7 @@ class VideoFrameViewer(QMainWindow):
         self.sync_offset_seconds: float = 0.0
         self.zoom_factor: float = 1.0
         self.last_frame = None
+        self.debug_mode = False
         self.time_series_viewer = TimeSeriesViewer()
         self.time_series_viewer.cursor_time_changed.connect(self._sync_frame_to_time)
 
@@ -196,6 +198,8 @@ class VideoFrameViewer(QMainWindow):
         self.directory_input.returnPressed.connect(self._scan_directory)
         browse_button = QPushButton("Browse")
         scan_button = QPushButton("Rescan")
+        self.debug_checkbox = QCheckBox("Debug data")
+        self.debug_checkbox.stateChanged.connect(lambda state: self._set_debug_mode(state == Qt.Checked))
 
         browse_button.clicked.connect(self._browse_directory)
         scan_button.clicked.connect(self._scan_directory)
@@ -204,6 +208,7 @@ class VideoFrameViewer(QMainWindow):
         directory_layout.addWidget(self.directory_input)
         directory_layout.addWidget(browse_button)
         directory_layout.addWidget(scan_button)
+        directory_layout.addWidget(self.debug_checkbox)
 
         parent_layout.addWidget(directory_group)
 
@@ -462,12 +467,15 @@ class VideoFrameViewer(QMainWindow):
             self._scan_directory()
 
     def _initialize_dataset_root(self) -> None:
-        self.directory_input.setText(str(self.DATASET_ROOT))
+        self.directory_input.setText(str(self._current_dataset_root()))
         self._scan_directory()
+
+    def _current_dataset_root(self) -> Path:
+        return self._debug_dataset_root() if self.debug_mode else self.DATASET_ROOT
 
     def _scan_directory(self) -> None:
         root_text = self.directory_input.text().strip()
-        root_path = Path(root_text).expanduser() if root_text else self.DATASET_ROOT
+        root_path = Path(root_text).expanduser() if root_text else self._current_dataset_root()
         self.directory_input.setText(str(root_path))
 
         if not root_path.exists():
@@ -477,7 +485,7 @@ class VideoFrameViewer(QMainWindow):
             )
             return
 
-        self.video_paths = find_md_mff_videos(root_path)
+        self.video_paths = find_md_mff_videos(root_path, allow_generic_mov=self.debug_mode)
 
         self.video_list.clear()
         for video_path in sorted(self.video_paths):
@@ -486,10 +494,31 @@ class VideoFrameViewer(QMainWindow):
 
         if self.video_paths:
             self._set_status(
-                f"Found {len(self.video_paths)} MD.mff .mov file(s) in the dataset root."
+                f"Found {len(self.video_paths)} {'debug ' if self.debug_mode else ''}video file(s) in the dataset root."
             )
         else:
-            self._set_status("No MD.mff .mov files found in the dataset root.")
+            missing_msg = "No .mov files found in the debug dataset." if self.debug_mode else "No MD.mff .mov files found in the dataset root."
+            self._set_status(missing_msg)
+
+    def _set_debug_mode(self, enabled: bool) -> None:
+        self.debug_mode = enabled
+        self.debug_checkbox.setChecked(enabled)
+        if enabled:
+            self.time_series_viewer.set_processed_root(self._debug_processed_root())
+            self.directory_input.setText(str(self._debug_dataset_root()))
+            self._set_status("Debug mode on: using bundled test dataset.")
+        else:
+            self.time_series_viewer.set_processed_root(PROCESSED_ROOT)
+            self.directory_input.setText(str(self.DATASET_ROOT))
+            self._set_status("Debug mode off: using configured dataset root.")
+
+        self._scan_directory()
+
+    def _debug_dataset_root(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "test_data" / "drowsy_driving_raja"
+
+    def _debug_processed_root(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "test_data" / "drowsy_driving_raja_processed"
 
     def _load_selected_video(self) -> None:
         selected_items = self.video_list.selectedItems()

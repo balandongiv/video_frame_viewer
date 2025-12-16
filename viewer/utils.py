@@ -55,11 +55,13 @@ def is_md_mff_video(path: Path) -> bool:
     return any("md.mff" in part.lower() for part in path.parts)
 
 
-def find_md_mff_videos(root: Path) -> List[Path]:
+def find_md_mff_videos(root: Path, *, allow_generic_mov: bool = False) -> List[Path]:
     """Return all MD.mff .mov videos under the given root, any extension case.
 
     Uses ``os.walk`` to avoid platform-specific glob quirks and guarantees we
-    only return files that match the MD.mff pattern.
+    only return files that match the MD.mff pattern. When ``allow_generic_mov``
+    is ``True`` (debug workflows), any ``.mov`` files are returned even if they
+    do not follow the MD.mff naming convention.
     """
 
     videos: List[Path] = []
@@ -68,7 +70,7 @@ def find_md_mff_videos(root: Path) -> List[Path]:
         dirpath_path = Path(dirpath)
         for name in filenames:
             candidate = dirpath_path / name
-            if is_md_mff_video(candidate):
+            if is_md_mff_video(candidate) or (allow_generic_mov and candidate.suffix.lower() == ".mov"):
                 videos.append(candidate)
 
     return videos

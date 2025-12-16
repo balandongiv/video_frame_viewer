@@ -25,6 +25,16 @@ class DeriveTimeSeriesPathTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             derive_time_series_path(video)
 
+    def test_fallback_to_subject_level_file(self) -> None:
+        processed_root = Path("/tmp/processed_root")
+        subject_dir = processed_root / "S1"
+        subject_dir.mkdir(parents=True, exist_ok=True)
+        fallback = subject_dir / "ear_eog.fif"
+        fallback.touch()
+
+        video = Path(r"D:\dataset\drowsy_driving_raja\S1\MD\file_example_MOV_480_700kB.mov")
+        self.assertEqual(derive_time_series_path(video, processed_root=processed_root), fallback)
+
 
 if __name__ == "__main__":
     unittest.main()
