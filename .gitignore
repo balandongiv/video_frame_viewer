@@ -1,5 +1,4 @@
 __pycache__/
 *.pyc
 .ruff_cache/
-test_data/drowsy_driving_raja_processed/S1/ear_eog.csv
-test_data/drowsy_driving_raja_processed/S1/ear_eog.fif
+.idea
