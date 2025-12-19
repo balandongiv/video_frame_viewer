@@ -663,6 +663,7 @@ class VideoFrameViewer(QMainWindow):
         target_seconds = max(0.0, annotation_time - self.sync_offset_seconds)
         target_frame = seconds_to_frame_index(target_seconds, self.video_handler.fps)
         self._goto_frame(target_frame, show_status=False)
+        self.time_series_viewer.update_cursor_time(annotation_time)
 
     def _update_navigation_state(self, enabled: bool) -> None:
         for button in [
