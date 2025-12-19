@@ -111,6 +111,9 @@ class VideoFrameViewer(QMainWindow):
         self._setup_ui()
         self._setup_shortcuts()
         self.frame_scroll.viewport().installEventFilter(self)
+        self.time_series_viewer.annotation_jump_requested.connect(
+            self._jump_to_annotation_time
+        )
         self._update_navigation_state(False)
         self._initialize_dataset_root()
 
@@ -652,6 +655,16 @@ class VideoFrameViewer(QMainWindow):
     def _update_time_series_cursor(self) -> None:
         self.time_series_viewer.update_cursor_time(self._synced_time_seconds())
 
+    def _jump_to_annotation_time(self, annotation_time: float) -> None:
+        if not self.video_handler.capture:
+            self._set_status("Load a video to sync frame navigation.")
+            return
+
+        target_seconds = max(0.0, annotation_time - self.sync_offset_seconds)
+        target_frame = seconds_to_frame_index(target_seconds, self.video_handler.fps)
+        self._goto_frame(target_frame, show_status=False)
+        self.time_series_viewer.update_cursor_time(annotation_time)
+
     def _update_navigation_state(self, enabled: bool) -> None:
         for button in [
             self.left_button,
@@ -746,10 +759,30 @@ class VideoFrameViewer(QMainWindow):
         right_step_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         right_step_shortcut.activated.connect(self._trigger_right_step)
 
+        next_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_BracketRight), self)
+        next_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        next_annotation_shortcut.activated.connect(self._handle_next_annotation_shortcut)
+
+        previous_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_BracketLeft), self)
+        previous_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        previous_annotation_shortcut.activated.connect(self._handle_previous_annotation_shortcut)
+
+        next_annotation_letter = QShortcut(QKeySequence(Qt.Key_N), self)
+        next_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
+        next_annotation_letter.activated.connect(self._handle_next_annotation_shortcut)
+
+        previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_P), self)
+        previous_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
+        previous_annotation_letter.activated.connect(self._handle_previous_annotation_shortcut)
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
         self.right_step_shortcut = right_step_shortcut
+        self.next_annotation_shortcut = next_annotation_shortcut
+        self.previous_annotation_shortcut = previous_annotation_shortcut
+        self.next_annotation_letter = next_annotation_letter
+        self.previous_annotation_letter = previous_annotation_letter
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -758,6 +791,14 @@ class VideoFrameViewer(QMainWindow):
     def _handle_right_shortcut(self) -> None:
         if self._shortcut_allowed():
             self._trigger_right_jump()
+
+    def _handle_next_annotation_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.jump_to_next_annotation()
+
+    def _handle_previous_annotation_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.jump_to_previous_annotation()
 
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()

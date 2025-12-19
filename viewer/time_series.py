@@ -11,9 +11,10 @@ from typing import List, Optional, Set
 import mne
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -110,6 +111,10 @@ def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_R
 class TimeSeriesViewer(QWidget):
     """Widget that renders time series data alongside the video frames."""
 
+    annotation_jump_requested = pyqtSignal(float)
+    FILTER_ALL = "__all__"
+    FILTER_NONE = "__none__"
+
     def __init__(self, max_points: int = 10000, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.max_points = max_points
@@ -132,6 +137,7 @@ class TimeSeriesViewer(QWidget):
         self._annotation_drag_start: Optional[float] = None
         self._annotation_drag_preview: Optional[pg.LinearRegionItem] = None
         self._last_annotation_description = ""
+        self._annotation_filter_value = self.FILTER_ALL
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -179,14 +185,20 @@ class TimeSeriesViewer(QWidget):
         annotation_layout.setContentsMargins(0, 0, 0, 0)
         self.annotation_mode_checkbox = QCheckBox("Annotation mode (drag to add)")
         self.annotation_mode_checkbox.stateChanged.connect(self._on_annotation_mode_changed)
+        annotation_layout.addWidget(self.annotation_mode_checkbox)
+
+        annotation_layout.addWidget(QLabel("Annotations:"))
+        self.annotation_filter_combo = QComboBox()
+        self.annotation_filter_combo.currentIndexChanged.connect(self._on_annotation_filter_changed)
+        annotation_layout.addWidget(self.annotation_filter_combo)
         self.save_annotations_button = QPushButton("Save annotations")
         self.save_annotations_button.clicked.connect(self._save_annotations)
         self.save_annotations_button.setEnabled(False)
         self.annotations_dirty_label = QLabel("")
         self.annotations_dirty_label.setStyleSheet("color: #d32f2f;")
-        annotation_layout.addWidget(self.annotation_mode_checkbox)
         annotation_layout.addWidget(self.save_annotations_button)
         annotation_layout.addWidget(self.annotations_dirty_label)
+        annotation_layout.addWidget(QLabel("Shortcuts: [ or P = prev, ] or N = next"))
         annotation_layout.addStretch()
         annotation_controls.setLayout(annotation_layout)
 
@@ -201,6 +213,8 @@ class TimeSeriesViewer(QWidget):
         layout.setStretch(0, 1)
         layout.setStretch(1, 0)
         layout.setStretch(2, 0)
+
+        self._update_annotation_filter_options(force_all=True)
 
     def channel_controls(self) -> QWidget:
         """Expose the channel selection controls for external layouts."""
@@ -225,6 +239,7 @@ class TimeSeriesViewer(QWidget):
         self._last_ts_path = None
         self._annotations = []
         self._set_annotations_dirty(False)
+        self._update_annotation_filter_options(force_all=True)
 
         if video_path is None:
             self.status_label.setText("Select a video to view its time series.")
@@ -311,6 +326,7 @@ class TimeSeriesViewer(QWidget):
         self._annotations = list(annotations)
         for annotation in annotations:
             self._render_annotation(annotation)
+        self._update_annotation_filter_options()
         self._set_annotations_dirty(False)
 
     def _load_annotations(self, ts_path: Path) -> List[Annotation]:
@@ -566,6 +582,7 @@ class TimeSeriesViewer(QWidget):
         )
         region.setZValue(10 + len(self._annotation_items))
         region.setToolTip(annotation.description)
+        region.setVisible(self._annotation_visible(annotation))
         self.plot_widget.addItem(region)
         item = AnnotationItem(annotation=annotation, region=region)
         self._annotation_items.append(item)
@@ -631,6 +648,7 @@ class TimeSeriesViewer(QWidget):
         self._annotation_by_region.pop(annotation_item.region, None)
         self.plot_widget.removeItem(annotation_item.region)
         self._set_annotations_dirty(True)
+        self._update_annotation_filter_options()
         self.status_label.setText("Annotation deleted.")
 
     def _start_annotation_drag(self, pos) -> None:
@@ -697,6 +715,7 @@ class TimeSeriesViewer(QWidget):
             self._annotations.append(annotation)
             self._render_annotation(annotation)
             self._set_annotations_dirty(True)
+            self._update_annotation_filter_options()
             self.status_label.setText("Annotation added.")
 
         self._reset_annotation_drag()
@@ -727,3 +746,98 @@ class TimeSeriesViewer(QWidget):
             self.plot_widget.setCursor(Qt.CrossCursor)
         else:
             self.plot_widget.setCursor(Qt.ArrowCursor)
+
+    def jump_to_next_annotation(self) -> None:
+        """Jump the view to the next annotation onset."""
+
+        self._jump_to_annotation(direction="next")
+
+    def jump_to_previous_annotation(self) -> None:
+        """Jump the view to the previous annotation onset."""
+
+        self._jump_to_annotation(direction="previous")
+
+    def _jump_to_annotation(self, direction: str) -> None:
+        if self._times is None or not self._annotations:
+            self.status_label.setText("No annotations available.")
+            return
+
+        annotations = self._filtered_annotations()
+        if not annotations:
+            self.status_label.setText("No annotations match the current filter.")
+            return
+
+        current_position = self._last_cursor_time
+        if direction == "next":
+            candidates = [annotation for annotation in annotations if annotation.onset > current_position]
+            target = min(candidates, key=lambda entry: entry.onset, default=None)
+        else:
+            candidates = [annotation for annotation in annotations if annotation.onset < current_position]
+            target = max(candidates, key=lambda entry: entry.onset, default=None)
+
+        if target is None:
+            label = "next" if direction == "next" else "previous"
+            self.status_label.setText(f"No {label} annotation.")
+            return
+
+        self._ensure_view_range(target.onset)
+        self.annotation_jump_requested.emit(target.onset)
+        self.status_label.setText(
+            f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
+        )
+
+    def _on_annotation_filter_changed(self) -> None:
+        data = self.annotation_filter_combo.currentData()
+        if data is None:
+            data = self.FILTER_ALL
+        self._annotation_filter_value = data
+        self._apply_annotation_filter()
+
+    def _annotation_visible(self, annotation: Annotation) -> bool:
+        if self._annotation_filter_value == self.FILTER_ALL:
+            return True
+        if self._annotation_filter_value == self.FILTER_NONE:
+            return False
+        return annotation.description == self._annotation_filter_value
+
+    def _filtered_annotations(self) -> List[Annotation]:
+        if self._annotation_filter_value == self.FILTER_ALL:
+            return list(self._annotations)
+        if self._annotation_filter_value == self.FILTER_NONE:
+            return []
+        return [
+            annotation
+            for annotation in self._annotations
+            if annotation.description == self._annotation_filter_value
+        ]
+
+    def _apply_annotation_filter(self) -> None:
+        for item in self._annotation_items:
+            item.region.setVisible(self._annotation_visible(item.annotation))
+
+    def _update_annotation_filter_options(self, force_all: bool = False) -> None:
+        descriptions = sorted({annotation.description for annotation in self._annotations})
+        current_value = self._annotation_filter_value
+        if force_all:
+            current_value = self.FILTER_ALL
+
+        self.annotation_filter_combo.blockSignals(True)
+        self.annotation_filter_combo.clear()
+        self.annotation_filter_combo.addItem("All", self.FILTER_ALL)
+        for description in descriptions:
+            self.annotation_filter_combo.addItem(description, description)
+        none_label = "None"
+        if any(description == none_label for description in descriptions):
+            none_label = "Hide all"
+        self.annotation_filter_combo.addItem(none_label, self.FILTER_NONE)
+
+        selected_index = 0
+        for index in range(self.annotation_filter_combo.count()):
+            if self.annotation_filter_combo.itemData(index) == current_value:
+                selected_index = index
+                break
+
+        self.annotation_filter_combo.setCurrentIndex(selected_index)
+        self.annotation_filter_combo.blockSignals(False)
+        self._annotation_filter_value = self.annotation_filter_combo.currentData()
+        self._apply_annotation_filter()
