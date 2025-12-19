@@ -67,7 +67,13 @@ def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_R
     if parts and parts[-1].isdigit() and len(parts[-1]) <= 2:
         base_identifier = "_".join(parts[:-1]) or base_identifier
 
-    return processed_root / subject_folder / base_identifier / "ear_eog.fif"
+    candidate = processed_root / subject_folder / base_identifier / "ear_eog.fif"
+    fallback = processed_root / subject_folder / "ear_eog.fif"
+
+    if not candidate.exists() and fallback.exists():
+        return fallback
+
+    return candidate
 
 
 class TimeSeriesViewer(QWidget):
@@ -85,6 +91,7 @@ class TimeSeriesViewer(QWidget):
         self.view_span_seconds: float = self.default_view_span_seconds
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
+        self.processed_root: Path = PROCESSED_ROOT
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -142,6 +149,11 @@ class TimeSeriesViewer(QWidget):
 
         return self._controls_container
 
+    def set_processed_root(self, processed_root: Path) -> None:
+        """Override the processed dataset root for time series data."""
+
+        self.processed_root = processed_root
+
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""
 
@@ -159,7 +171,7 @@ class TimeSeriesViewer(QWidget):
             return
 
         try:
-            ts_path = derive_time_series_path(video_path)
+            ts_path = derive_time_series_path(video_path, processed_root=self.processed_root)
         except ValueError as exc:  # pragma: no cover - guardrails for unexpected paths
             self.status_label.setText(str(exc))
             self.cursor_line.hide()

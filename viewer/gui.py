@@ -6,6 +6,7 @@ from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -27,7 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from viewer.time_series import TimeSeriesViewer
+from viewer.time_series import PROCESSED_ROOT, TimeSeriesViewer
 from viewer.utils import (
     frame_to_pixmap,
     find_md_mff_videos,
@@ -114,6 +115,10 @@ class VideoFrameViewer(QMainWindow):
     """Main window for browsing and navigating video frames."""
 
     DATASET_ROOT = Path(r"D:\dataset\drowsy_driving_raja")
+    TEST_DATASET_ROOT = Path(__file__).resolve().parents[1] / "test_data" / "drowsy_driving_raja"
+    TEST_PROCESSED_ROOT = (
+        Path(__file__).resolve().parents[1] / "test_data" / "drowsy_driving_raja_processed"
+    )
     SINGLE_STEP = 1
     JUMP_STEP = 10
     TIME_BASE_FPS = 30
@@ -195,14 +200,17 @@ class VideoFrameViewer(QMainWindow):
         self.directory_input.returnPressed.connect(self._scan_directory)
         browse_button = QPushButton("Browse")
         scan_button = QPushButton("Rescan")
+        self.debug_toggle = QCheckBox("Use test data")
 
         browse_button.clicked.connect(self._browse_directory)
         scan_button.clicked.connect(self._scan_directory)
+        self.debug_toggle.stateChanged.connect(self._toggle_debug_data)
 
         directory_layout.addWidget(QLabel("Root:"))
         directory_layout.addWidget(self.directory_input)
         directory_layout.addWidget(browse_button)
         directory_layout.addWidget(scan_button)
+        directory_layout.addWidget(self.debug_toggle)
 
         parent_layout.addWidget(directory_group)
 
@@ -462,6 +470,18 @@ class VideoFrameViewer(QMainWindow):
 
     def _initialize_dataset_root(self) -> None:
         self.directory_input.setText(str(self.DATASET_ROOT))
+        self._scan_directory()
+
+    def _toggle_debug_data(self, state: int) -> None:
+        use_test_data = state == Qt.Checked
+        if use_test_data:
+            self.directory_input.setText(str(self.TEST_DATASET_ROOT))
+            self.time_series_viewer.set_processed_root(self.TEST_PROCESSED_ROOT)
+            self._set_status("Debug mode enabled: using bundled test data.")
+        else:
+            self.directory_input.setText(str(self.DATASET_ROOT))
+            self.time_series_viewer.set_processed_root(PROCESSED_ROOT)
+            self._set_status("Debug mode disabled: using default dataset paths.")
         self._scan_directory()
 
     def _scan_directory(self) -> None:
