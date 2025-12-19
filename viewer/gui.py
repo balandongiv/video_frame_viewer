@@ -32,6 +32,7 @@ from viewer.time_series import PROCESSED_ROOT, TimeSeriesViewer
 from viewer.utils import (
     frame_to_pixmap,
     find_md_mff_videos,
+    find_mov_videos,
     placeholder_pixmap,
     seconds_to_frame_index,
 )
@@ -141,6 +142,7 @@ class VideoFrameViewer(QMainWindow):
         self.zoom_factor: float = 1.0
         self.last_frame = None
         self.time_series_viewer = TimeSeriesViewer()
+        self.use_test_data = False
 
         self._setup_ui()
         self._setup_shortcuts()
@@ -473,8 +475,8 @@ class VideoFrameViewer(QMainWindow):
         self._scan_directory()
 
     def _toggle_debug_data(self, state: int) -> None:
-        use_test_data = state == Qt.Checked
-        if use_test_data:
+        self.use_test_data = state == Qt.Checked
+        if self.use_test_data:
             self.directory_input.setText(str(self.TEST_DATASET_ROOT))
             self.time_series_viewer.set_processed_root(self.TEST_PROCESSED_ROOT)
             self._set_status("Debug mode enabled: using bundled test data.")
@@ -496,7 +498,10 @@ class VideoFrameViewer(QMainWindow):
             )
             return
 
-        self.video_paths = find_md_mff_videos(root_path)
+        if self.use_test_data:
+            self.video_paths = find_mov_videos(root_path)
+        else:
+            self.video_paths = find_md_mff_videos(root_path)
 
         self.video_list.clear()
         for video_path in sorted(self.video_paths):
@@ -504,11 +509,13 @@ class VideoFrameViewer(QMainWindow):
             self.video_list.addItem(item)
 
         if self.video_paths:
+            descriptor = "test .mov" if self.use_test_data else "MD.mff .mov"
             self._set_status(
-                f"Found {len(self.video_paths)} MD.mff .mov file(s) in the dataset root."
+                f"Found {len(self.video_paths)} {descriptor} file(s) in the dataset root."
             )
         else:
-            self._set_status("No MD.mff .mov files found in the dataset root.")
+            descriptor = "test .mov" if self.use_test_data else "MD.mff .mov"
+            self._set_status(f"No {descriptor} files found in the dataset root.")
 
     def _load_selected_video(self) -> None:
         selected_items = self.video_list.selectedItems()
