@@ -767,7 +767,7 @@ class TimeSeriesViewer(QWidget):
             self.status_label.setText("No annotations match the current filter.")
             return
 
-        current_position = self._current_view_center()
+        current_position = self._last_cursor_time
         if direction == "next":
             candidates = [annotation for annotation in annotations if annotation.onset > current_position]
             target = min(candidates, key=lambda entry: entry.onset, default=None)
@@ -785,18 +785,6 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText(
             f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
         )
-
-    def _current_view_center(self) -> float:
-        view_box = self.plot_widget.getPlotItem().getViewBox()
-        if view_box is None:
-            return self._last_cursor_time
-        view_range = view_box.viewRange()
-        if not view_range or not view_range[0]:
-            return self._last_cursor_time
-        center = float(sum(view_range[0]) / 2)
-        if not math.isfinite(center):
-            return self._last_cursor_time
-        return center
 
     def _on_annotation_filter_changed(self) -> None:
         data = self.annotation_filter_combo.currentData()
