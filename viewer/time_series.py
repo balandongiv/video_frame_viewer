@@ -1,6 +1,10 @@
 """Time series loading and visualization helpers."""
 from __future__ import annotations
 
+import csv
+import logging
+import math
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Set
 
@@ -29,6 +33,24 @@ CHANNEL_PALETTE = [
     "#b71c1c",
     "#f44336",
 ]
+ANNOTATION_PALETTE = [
+    "#1e88e5",
+    "#43a047",
+    "#fb8c00",
+    "#8e24aa",
+    "#6d4c41",
+    "#00897b",
+    "#f4511e",
+]
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Annotation:
+    onset: float
+    duration: float
+    description: str
 
 
 def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_ROOT) -> Path:
@@ -92,6 +114,8 @@ class TimeSeriesViewer(QWidget):
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
         self.processed_root: Path = PROCESSED_ROOT
+        self._annotation_items: List[pg.GraphicsObject] = []
+        self._annotation_colors: dict[str, pg.Color] = {}
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -158,6 +182,7 @@ class TimeSeriesViewer(QWidget):
         """Load and plot the time series associated with the provided video."""
 
         self._clear_plot()
+        self._clear_annotations()
         self._times = None
         self.raw = None
         self._selected_channels.clear()
@@ -189,6 +214,7 @@ class TimeSeriesViewer(QWidget):
         self._times = self.raw.times
         self._populate_channel_list()
         self._plot_data()
+        self._add_annotations_for_path(ts_path)
         self._ensure_view_range(0.0)
 
     def update_cursor_time(self, seconds: float) -> None:
@@ -237,6 +263,90 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText(
             f"Displaying {len(picks)} of {total_channels} channel(s) from {self._last_ts_path}"
         )
+
+    def _add_annotations_for_path(self, ts_path: Path) -> None:
+        if self._times is None or self._times.size == 0:
+            return
+
+        annotations = self._load_annotations(ts_path)
+        if not annotations:
+            return
+
+        data_end = float(self._times[-1])
+        for annotation in annotations:
+            start = max(0.0, annotation.onset)
+            end = annotation.onset + annotation.duration
+            if not math.isfinite(end):
+                continue
+            end = min(end, data_end)
+
+            if end <= start or start >= data_end:
+                continue
+
+            base_color = self._color_for_description(annotation.description)
+            brush_color = pg.mkColor(base_color)
+            brush_color.setAlpha(60)
+            pen_color = pg.mkColor(base_color)
+            pen_color.setAlpha(160)
+
+            region = pg.LinearRegionItem(
+                values=[start, end],
+                brush=pg.mkBrush(brush_color),
+                pen=pg.mkPen(pen_color, width=1),
+                movable=False,
+            )
+            region.setZValue(5)
+            region.setToolTip(annotation.description)
+            self.plot_widget.addItem(region)
+            self._annotation_items.append(region)
+
+    def _load_annotations(self, ts_path: Path) -> List[Annotation]:
+        csv_path = ts_path.with_suffix(".csv")
+        if not csv_path.exists():
+            LOGGER.info("No annotation CSV found at %s", csv_path)
+            return []
+
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle, skipinitialspace=True)
+                if reader.fieldnames is None:
+                    LOGGER.warning("Annotation CSV missing headers: %s", csv_path)
+                    return []
+
+                normalized = {name.strip(): name for name in reader.fieldnames}
+                required = {"onset", "duration", "description"}
+                if not required.issubset(normalized):
+                    LOGGER.warning("Annotation CSV missing required columns: %s", csv_path)
+                    return []
+
+                annotations: List[Annotation] = []
+                for row in reader:
+                    onset = self._parse_float(row.get(normalized["onset"]))
+                    duration = self._parse_float(row.get(normalized["duration"]))
+                    description = (row.get(normalized["description"]) or "").strip()
+
+                    if onset is None or duration is None or duration <= 0 or not description:
+                        continue
+
+                    annotations.append(
+                        Annotation(onset=onset, duration=duration, description=description)
+                    )
+
+                return annotations
+        except (OSError, csv.Error) as exc:
+            LOGGER.warning("Failed to read annotations from %s: %s", csv_path, exc)
+            return []
+
+    def _parse_float(self, value: Optional[str]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
 
     def _populate_channel_list(self) -> None:
         if self.raw is None:
@@ -354,6 +464,17 @@ class TimeSeriesViewer(QWidget):
         self.plot_widget.enableAutoRange()
         if hide_cursor:
             self.cursor_line.hide()
+
+    def _clear_annotations(self) -> None:
+        for item in self._annotation_items:
+            self.plot_widget.removeItem(item)
+        self._annotation_items.clear()
+
+    def _color_for_description(self, description: str) -> pg.Color:
+        if description not in self._annotation_colors:
+            palette_index = len(self._annotation_colors) % len(ANNOTATION_PALETTE)
+            self._annotation_colors[description] = pg.mkColor(ANNOTATION_PALETTE[palette_index])
+        return self._annotation_colors[description]
 
     def _pen_for_channel(self, channel_name: str, index: int) -> pg.Pen:
         if channel_name == PRIMARY_CHANNEL:
