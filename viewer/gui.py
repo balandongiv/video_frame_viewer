@@ -754,12 +754,22 @@ class VideoFrameViewer(QMainWindow):
         previous_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         previous_annotation_shortcut.activated.connect(self._handle_previous_annotation_shortcut)
 
+        next_annotation_letter = QShortcut(QKeySequence(Qt.Key_N), self)
+        next_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
+        next_annotation_letter.activated.connect(self._handle_next_annotation_shortcut)
+
+        previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_P), self)
+        previous_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
+        previous_annotation_letter.activated.connect(self._handle_previous_annotation_shortcut)
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
         self.right_step_shortcut = right_step_shortcut
         self.next_annotation_shortcut = next_annotation_shortcut
         self.previous_annotation_shortcut = previous_annotation_shortcut
+        self.next_annotation_letter = next_annotation_letter
+        self.previous_annotation_letter = previous_annotation_letter
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
