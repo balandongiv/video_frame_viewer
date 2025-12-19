@@ -33,7 +33,6 @@ from viewer.utils import (
     frame_to_pixmap,
     find_md_mff_videos,
     find_mov_videos,
-    placeholder_pixmap,
     seconds_to_frame_index,
 )
 from viewer.video_handler import VideoHandler
@@ -79,39 +78,6 @@ class PannableLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
-class PreviewWidget(QWidget):
-    """Container for a single preview frame thumbnail and its caption."""
-
-    def __init__(self, preview_size: QSize, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.preview_size = preview_size
-
-        layout = QVBoxLayout()
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(2)
-
-        self.image_label = QLabel()
-        self.image_label.setFixedSize(self.preview_size)
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        self.caption_label = QLabel("-")
-        self.caption_label.setAlignment(Qt.AlignCenter)
-
-        layout.addWidget(self.image_label)
-        layout.addWidget(self.caption_label)
-        self.setLayout(layout)
-
-    def set_pixmap(self, pixmap: Optional):
-        """Set the preview image pixmap, defaulting to a placeholder."""
-        if pixmap is None:
-            pixmap = placeholder_pixmap(self.preview_size)
-        self.image_label.setPixmap(pixmap)
-
-    def set_caption(self, caption: str) -> None:
-        self.caption_label.setText(caption)
-
-
 class VideoFrameViewer(QMainWindow):
     """Main window for browsing and navigating video frames."""
 
@@ -123,8 +89,6 @@ class VideoFrameViewer(QMainWindow):
     SINGLE_STEP = 1
     JUMP_STEP = 10
     TIME_BASE_FPS = 30
-    PREVIEW_RANGE = 5
-    PREVIEW_SIZE = QSize(96, 54)
     MIN_ZOOM = 0.25
     MAX_ZOOM = 10.0
 
@@ -236,9 +200,6 @@ class VideoFrameViewer(QMainWindow):
 
         layout.addWidget(QLabel("Frame Display"))
 
-        frame_and_preview_splitter = QSplitter(Qt.Horizontal)
-        frame_and_preview_splitter.setChildrenCollapsible(False)
-
         frame_area = QWidget()
         frame_area_layout = QVBoxLayout()
         frame_area_layout.setContentsMargins(0, 0, 0, 0)
@@ -262,40 +223,7 @@ class VideoFrameViewer(QMainWindow):
         frame_area_layout.addWidget(self.frame_scroll)
         frame_area_layout.addWidget(self.frame_info_label)
 
-        frame_and_preview_splitter.addWidget(frame_area)
-
-        self.preview_group = QGroupBox("Surrounding Frames")
-        preview_layout = QVBoxLayout()
-        preview_layout.setContentsMargins(6, 6, 6, 6)
-        preview_layout.setSpacing(4)
-
-        preview_strip = QWidget()
-        preview_strip_layout = QVBoxLayout()
-        preview_strip_layout.setContentsMargins(0, 0, 0, 0)
-        preview_strip_layout.setSpacing(6)
-        preview_strip.setLayout(preview_strip_layout)
-
-        self.preview_widgets: List[PreviewWidget] = []
-        for _ in range(self._preview_count):
-            widget = PreviewWidget(self.PREVIEW_SIZE)
-            widget.set_pixmap(None)
-            self.preview_widgets.append(widget)
-            preview_strip_layout.addWidget(widget)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(preview_strip)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        preview_layout.addWidget(scroll_area)
-        self.preview_group.setLayout(preview_layout)
-        frame_and_preview_splitter.addWidget(self.preview_group)
-
-        frame_and_preview_splitter.setStretchFactor(0, 5)
-        frame_and_preview_splitter.setStretchFactor(1, 1)
-
-        layout.addWidget(frame_and_preview_splitter)
+        layout.addWidget(frame_area)
 
         return container
 
@@ -456,10 +384,6 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(self.current_frame_label, 6, 0, 1, 3)
 
         return control_group
-
-    @property
-    def _preview_count(self) -> int:
-        return (self.PREVIEW_RANGE * 2) + 1
 
     # Directory logic
     def _browse_directory(self) -> None:
@@ -674,7 +598,6 @@ class VideoFrameViewer(QMainWindow):
         self.current_frame_index = clamped_index
         self._display_frame(frame)
         self._update_frame_label()
-        self._update_previews()
         self._update_time_series_cursor()
         if show_status:
             self._set_status(
@@ -728,27 +651,6 @@ class VideoFrameViewer(QMainWindow):
 
     def _update_time_series_cursor(self) -> None:
         self.time_series_viewer.update_cursor_time(self._synced_time_seconds())
-
-    def _update_previews(self) -> None:
-        if self.video_handler.frame_count <= 0:
-            for widget in self.preview_widgets:
-                widget.set_pixmap(None)
-                widget.set_caption("-")
-            return
-
-        start_index = self.current_frame_index - self.PREVIEW_RANGE
-        indices = [start_index + offset for offset in range(self._preview_count)]
-
-        for widget, index in zip(self.preview_widgets, indices):
-            if index < 0 or index >= self.video_handler.frame_count:
-                widget.set_pixmap(None)
-                widget.set_caption(f"Frame {index} (out)")
-                continue
-
-            frame = self.video_handler.read_frame(index)
-            pixmap = frame_to_pixmap(frame, self.PREVIEW_SIZE)
-            widget.set_pixmap(pixmap)
-            widget.set_caption(f"Frame {index}")
 
     def _update_navigation_state(self, enabled: bool) -> None:
         for button in [
