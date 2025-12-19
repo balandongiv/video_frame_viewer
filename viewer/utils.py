@@ -72,3 +72,18 @@ def find_md_mff_videos(root: Path) -> List[Path]:
                 videos.append(candidate)
 
     return videos
+
+
+def find_mov_videos(root: Path) -> List[Path]:
+    """Return all .mov videos under the given root, any extension case."""
+
+    videos: List[Path] = []
+
+    for dirpath, _, filenames in os.walk(root):
+        dirpath_path = Path(dirpath)
+        for name in filenames:
+            candidate = dirpath_path / name
+            if candidate.suffix.lower() == ".mov":
+                videos.append(candidate)
+
+    return videos
