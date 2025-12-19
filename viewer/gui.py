@@ -111,6 +111,9 @@ class VideoFrameViewer(QMainWindow):
         self._setup_ui()
         self._setup_shortcuts()
         self.frame_scroll.viewport().installEventFilter(self)
+        self.time_series_viewer.annotation_jump_requested.connect(
+            self._jump_to_annotation_time
+        )
         self._update_navigation_state(False)
         self._initialize_dataset_root()
 
@@ -651,6 +654,15 @@ class VideoFrameViewer(QMainWindow):
 
     def _update_time_series_cursor(self) -> None:
         self.time_series_viewer.update_cursor_time(self._synced_time_seconds())
+
+    def _jump_to_annotation_time(self, annotation_time: float) -> None:
+        if not self.video_handler.capture:
+            self._set_status("Load a video to sync frame navigation.")
+            return
+
+        target_seconds = max(0.0, annotation_time - self.sync_offset_seconds)
+        target_frame = seconds_to_frame_index(target_seconds, self.video_handler.fps)
+        self._goto_frame(target_frame, show_status=False)
 
     def _update_navigation_state(self, enabled: bool) -> None:
         for button in [

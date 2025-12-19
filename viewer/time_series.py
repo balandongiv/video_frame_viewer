@@ -11,7 +11,7 @@ from typing import List, Optional, Set
 import mne
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -111,6 +111,7 @@ def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_R
 class TimeSeriesViewer(QWidget):
     """Widget that renders time series data alongside the video frames."""
 
+    annotation_jump_requested = pyqtSignal(float)
     FILTER_ALL = "__all__"
     FILTER_NONE = "__none__"
 
@@ -780,6 +781,7 @@ class TimeSeriesViewer(QWidget):
             return
 
         self._ensure_view_range(target.onset)
+        self.annotation_jump_requested.emit(target.onset)
         self.status_label.setText(
             f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
         )
