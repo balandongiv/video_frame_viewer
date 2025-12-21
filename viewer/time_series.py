@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Set
@@ -68,6 +69,7 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class Annotation:
+    uid: str
     onset: float
     duration: float
     description: str
@@ -581,16 +583,23 @@ class TimeSeriesViewer(QWidget):
                     return []
 
                 annotations: List[Annotation] = []
+                id_column = normalized.get("id")
                 for row in reader:
                     onset = self._parse_float(row.get(normalized["onset"]))
                     duration = self._parse_float(row.get(normalized["duration"]))
                     description = (row.get(normalized["description"]) or "").strip()
+                    annotation_id = (row.get(id_column) or "").strip() if id_column else ""
 
                     if onset is None or duration is None or duration <= 0 or not description:
                         continue
 
                     annotations.append(
-                        Annotation(onset=onset, duration=duration, description=description)
+                        Annotation(
+                            uid=annotation_id or self._generate_annotation_id(),
+                            onset=onset,
+                            duration=duration,
+                            description=description,
+                        )
                     )
 
                 return annotations
@@ -866,12 +875,16 @@ class TimeSeriesViewer(QWidget):
         csv_path = self._last_ts_path.with_suffix(".csv")
         try:
             annotations = self._current_annotations_for_save()
+            expected_ids = {annotation.uid for annotation in annotations}
             expected_rows = self._write_annotations_csv(csv_path, annotations)
             actual_rows = self._count_csv_rows(csv_path)
             if actual_rows != expected_rows:
                 raise ValueError(
                     f"Annotation CSV row count mismatch (expected {expected_rows}, got {actual_rows})."
                 )
+            actual_ids = self._read_annotation_ids(csv_path)
+            if actual_ids != expected_ids:
+                raise ValueError("Annotation CSV IDs do not match the current annotations.")
         except (OSError, csv.Error, ValueError) as exc:
             self.status_label.setText(f"Failed to save annotations: {exc}")
             return
@@ -1015,16 +1028,21 @@ class TimeSeriesViewer(QWidget):
 
     def _current_annotations_for_save(self) -> List[Annotation]:
         items = self._annotation_items_by_widget.get(self.plot_widget, [])
-        annotations: List[Annotation] = []
+        annotations: dict[str, Annotation] = {}
         for item in items:
+            if item.annotation not in self._annotations:
+                continue
             start, end = item.region.getRegion()
             onset, duration = self._normalize_region_values(start, end)
             item.annotation.onset = onset
             item.annotation.duration = duration
             if item.annotation.description:
-                annotations.append(item.annotation)
-        self._annotations = list(annotations)
-        return annotations
+                annotations[item.annotation.uid] = item.annotation
+        self._annotations = list(annotations.values())
+        return list(annotations.values())
+
+    def _generate_annotation_id(self) -> str:
+        return str(uuid.uuid4())
 
     def _write_annotations_csv(self, csv_path: Path, annotations: List[Annotation]) -> int:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1040,11 +1058,15 @@ class TimeSeriesViewer(QWidget):
         tmp_path = Path(tmp_handle.name)
         expected_rows = 1
         try:
-            writer = csv.DictWriter(tmp_handle, fieldnames=["onset", "duration", "description"])
+            writer = csv.DictWriter(
+                tmp_handle,
+                fieldnames=["id", "onset", "duration", "description"],
+            )
             writer.writeheader()
             for annotation in sorted(annotations, key=lambda entry: entry.onset):
                 writer.writerow(
                     {
+                        "id": annotation.uid,
                         "onset": f"{annotation.onset:.6f}",
                         "duration": f"{annotation.duration:.6f}",
                         "description": annotation.description,
@@ -1071,11 +1093,27 @@ class TimeSeriesViewer(QWidget):
             reader = csv.reader(handle)
             return sum(1 for _ in reader)
 
+    def _read_annotation_ids(self, csv_path: Path) -> set[str]:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle, skipinitialspace=True)
+            if reader.fieldnames is None:
+                return set()
+            normalized = {name.strip(): name for name in reader.fieldnames}
+            id_column = normalized.get("id")
+            if not id_column:
+                return set()
+            return {row.get(id_column, "").strip() for row in reader if row.get(id_column)}
+
     def _delete_annotation(self, annotation_item: AnnotationItem) -> None:
         if annotation_item.annotation in self._annotations:
             self._annotations.remove(annotation_item.annotation)
         self._annotation_by_region.pop(annotation_item.region, None)
         self.plot_widget.removeItem(annotation_item.region)
+        self._annotation_items_by_widget[self.plot_widget] = [
+            item
+            for item in self._annotation_items_by_widget[self.plot_widget]
+            if item is not annotation_item
+        ]
         for widget, items in self._annotation_items_by_widget.items():
             if widget is self.plot_widget:
                 continue
@@ -1147,7 +1185,12 @@ class TimeSeriesViewer(QWidget):
 
         description = self._prompt_for_description()
         if description:
-            annotation = Annotation(onset=onset, duration=duration, description=description)
+            annotation = Annotation(
+                uid=self._generate_annotation_id(),
+                onset=onset,
+                duration=duration,
+                description=description,
+            )
             self._annotations.append(annotation)
             self._render_annotation(annotation)
             self._set_annotations_dirty(True)
