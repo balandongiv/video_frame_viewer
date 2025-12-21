@@ -581,7 +581,7 @@ class TimeSeriesViewer(QWidget):
                 for row in reader:
                     onset = self._parse_float(row.get(normalized["onset"]))
                     duration = self._parse_float(row.get(normalized["duration"]))
-                    description = (row.get(normalized["description"]) or "").strip()
+                    description = self._clean_label(row.get(normalized["description"]) or "")
 
                     if onset is None or duration is None or duration <= 0 or not description:
                         continue
@@ -738,10 +738,13 @@ class TimeSeriesViewer(QWidget):
             self._annotation_drag_preview = None
 
     def _color_for_description(self, description: str) -> pg.Color:
-        if description not in self._annotation_colors:
+        key = self._label_key(description)
+        if not key:
+            key = description
+        if key not in self._annotation_colors:
             palette_index = len(self._annotation_colors) % len(ANNOTATION_PALETTE)
-            self._annotation_colors[description] = pg.mkColor(ANNOTATION_PALETTE[palette_index])
-        return self._annotation_colors[description]
+            self._annotation_colors[key] = pg.mkColor(ANNOTATION_PALETTE[palette_index])
+        return self._annotation_colors[key]
 
     def _pen_for_channel(self, channel_name: str, index: int) -> pg.Pen:
         if channel_name == PRIMARY_CHANNEL:
@@ -812,11 +815,7 @@ class TimeSeriesViewer(QWidget):
         if end <= start or start >= data_end:
             return
 
-        base_color = self._color_for_description(annotation.description)
-        brush_color = pg.mkColor(base_color)
-        brush_color.setAlpha(60)
-        pen_color = pg.mkColor(base_color)
-        pen_color.setAlpha(160)
+        brush_color, pen_color = self._annotation_colors_for_description(annotation.description)
 
         region = self._create_annotation_region(
             annotation,
@@ -885,8 +884,11 @@ class TimeSeriesViewer(QWidget):
             return
 
         menu = QMenu(self)
+        change_label_action = menu.addAction("Change label…")
         delete_action = menu.addAction("Delete annotation")
         selected_action = menu.exec_(self.plot_widget.viewport().mapToGlobal(pos))
+        if selected_action == change_label_action:
+            self._change_annotation_label(annotation_item)
         if selected_action == delete_action:
             self._delete_annotation(annotation_item)
 
@@ -935,6 +937,16 @@ class TimeSeriesViewer(QWidget):
         self._set_annotations_dirty(True)
         self._update_annotation_filter_options()
         self.status_label.setText("Annotation deleted.")
+
+    def _change_annotation_label(self, annotation_item: AnnotationItem) -> None:
+        current_label = annotation_item.annotation.description
+        new_label = self._prompt_for_label("Change label", default=current_label)
+        if not new_label:
+            return
+        if self._label_key(new_label) == self._label_key(current_label):
+            return
+        self._update_annotation_label(annotation_item.annotation, new_label)
+        self.status_label.setText(f"Annotation label changed to '{new_label}'.")
 
     def _start_annotation_drag(self, pos) -> None:
         time_value = self._time_at_position(pos)
@@ -994,8 +1006,9 @@ class TimeSeriesViewer(QWidget):
             if onset + duration > data_end:
                 onset = max(0.0, data_end - duration)
 
-        description = self._prompt_for_description()
+        description = self._prompt_for_label("Add annotation", default=self._last_annotation_description)
         if description:
+            self._last_annotation_description = description
             annotation = Annotation(onset=onset, duration=duration, description=description)
             self._annotations.append(annotation)
             self._render_annotation(annotation)
@@ -1005,19 +1018,17 @@ class TimeSeriesViewer(QWidget):
 
         self._reset_annotation_drag()
 
-    def _prompt_for_description(self) -> str:
-        default = self._last_annotation_description or ""
-        text, ok = QInputDialog.getText(
-            self,
-            "Add annotation",
-            "Description:",
-            text=default,
-        )
-        description = text.strip()
-        if ok and description:
-            self._last_annotation_description = description
-            return description
-        return ""
+    def _prompt_for_label(self, title: str, default: str = "") -> str:
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText("Label (select or type new):")
+        dialog.setComboBoxItems(self._available_labels())
+        dialog.setComboBoxEditable(True)
+        if default:
+            dialog.setTextValue(default)
+        if dialog.exec_() != QInputDialog.Accepted:
+            return ""
+        return self._resolve_label(dialog.textValue())
 
     def _reset_annotation_drag(self) -> None:
         self._annotation_dragging = False
@@ -1083,7 +1094,7 @@ class TimeSeriesViewer(QWidget):
             return True
         if self._annotation_filter_value == self.FILTER_NONE:
             return False
-        return annotation.description == self._annotation_filter_value
+        return self._label_key(annotation.description) == self._annotation_filter_value
 
     def _filtered_annotations(self) -> List[Annotation]:
         if self._annotation_filter_value == self.FILTER_ALL:
@@ -1093,7 +1104,7 @@ class TimeSeriesViewer(QWidget):
         return [
             annotation
             for annotation in self._annotations
-            if annotation.description == self._annotation_filter_value
+            if self._label_key(annotation.description) == self._annotation_filter_value
         ]
 
     def _apply_annotation_filter(self) -> None:
@@ -1102,7 +1113,7 @@ class TimeSeriesViewer(QWidget):
                 item.region.setVisible(self._annotation_visible(item.annotation))
 
     def _update_annotation_filter_options(self, force_all: bool = False) -> None:
-        descriptions = sorted({annotation.description for annotation in self._annotations})
+        descriptions = self._available_labels()
         current_value = self._annotation_filter_value
         if force_all:
             current_value = self.FILTER_ALL
@@ -1111,7 +1122,7 @@ class TimeSeriesViewer(QWidget):
         self.annotation_filter_combo.clear()
         self.annotation_filter_combo.addItem("All", self.FILTER_ALL)
         for description in descriptions:
-            self.annotation_filter_combo.addItem(description, description)
+            self.annotation_filter_combo.addItem(description, self._label_key(description))
         none_label = "None"
         if any(description == none_label for description in descriptions):
             none_label = "Hide all"
@@ -1127,6 +1138,66 @@ class TimeSeriesViewer(QWidget):
         self.annotation_filter_combo.blockSignals(False)
         self._annotation_filter_value = self.annotation_filter_combo.currentData()
         self._apply_annotation_filter()
+
+    def _clean_label(self, label: str) -> str:
+        return " ".join(label.strip().split())
+
+    def _label_key(self, label: str) -> str:
+        cleaned = self._clean_label(label)
+        return cleaned.casefold()
+
+    def _label_lookup(self) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        for annotation in self._annotations:
+            cleaned = self._clean_label(annotation.description)
+            if not cleaned:
+                continue
+            key = cleaned.casefold()
+            labels.setdefault(key, cleaned)
+        return labels
+
+    def _available_labels(self) -> List[str]:
+        labels = self._label_lookup()
+        return sorted(labels.values(), key=str.casefold)
+
+    def _resolve_label(self, label: str) -> str:
+        cleaned = self._clean_label(label)
+        if not cleaned:
+            return ""
+        labels = self._label_lookup()
+        return labels.get(cleaned.casefold(), cleaned)
+
+    def _annotation_colors_for_description(self, description: str) -> tuple[pg.Color, pg.Color]:
+        base_color = self._color_for_description(description)
+        brush_color = pg.mkColor(base_color)
+        brush_color.setAlpha(60)
+        pen_color = pg.mkColor(base_color)
+        pen_color.setAlpha(160)
+        return brush_color, pen_color
+
+    def _update_annotation_label(self, annotation: Annotation, new_label: str) -> None:
+        updated = Annotation(
+            onset=annotation.onset,
+            duration=annotation.duration,
+            description=new_label,
+        )
+        for idx, entry in enumerate(self._annotations):
+            if entry == annotation:
+                self._annotations[idx] = updated
+                break
+        for items in self._annotation_items_by_widget.values():
+            for item in items:
+                if item.annotation == annotation:
+                    item.annotation = updated
+                    self._refresh_annotation_region(item.region, updated.description)
+        self._set_annotations_dirty(True)
+        self._update_annotation_filter_options()
+
+    def _refresh_annotation_region(self, region: pg.LinearRegionItem, description: str) -> None:
+        brush_color, pen_color = self._annotation_colors_for_description(description)
+        region.setBrush(pg.mkBrush(brush_color))
+        region.setPen(pg.mkPen(pen_color, width=1))
+        region.setToolTip(description)
 
     def _sync_lane_annotations(self) -> None:
         if not self._annotations:
