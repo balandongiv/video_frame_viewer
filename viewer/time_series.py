@@ -4,6 +4,10 @@ from __future__ import annotations
 import csv
 import logging
 import math
+import os
+import shutil
+import tempfile
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Set
@@ -64,7 +68,7 @@ MIN_ANNOTATION_DURATION = 0.1
 LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass
 class Annotation:
     onset: float
     duration: float
@@ -157,6 +161,7 @@ class TimeSeriesViewer(QWidget):
         self._lane_cursor_lines: dict[pg.PlotWidget, pg.InfiniteLine] = {}
         self._lane_series: dict[pg.PlotWidget, tuple[np.ndarray, np.ndarray]] = {}
         self._annotation_items_by_widget: dict[pg.PlotWidget, List[AnnotationItem]] = {}
+        self._syncing_annotation_regions = False
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -830,6 +835,7 @@ class TimeSeriesViewer(QWidget):
         item = AnnotationItem(annotation=annotation, region=region)
         self._annotation_items_by_widget[self.plot_widget].append(item)
         self._annotation_by_region[region] = item
+        self._connect_annotation_region(item)
         for widget in self._lane_widgets:
             if widget is self.plot_widget:
                 continue
@@ -842,9 +848,9 @@ class TimeSeriesViewer(QWidget):
                 widget,
                 len(self._annotation_items_by_widget[widget]),
             )
-            self._annotation_items_by_widget[widget].append(
-                AnnotationItem(annotation=annotation, region=region)
-            )
+            lane_item = AnnotationItem(annotation=annotation, region=region)
+            self._annotation_items_by_widget[widget].append(lane_item)
+            self._connect_annotation_region(lane_item)
 
     def _set_annotations_dirty(self, dirty: bool) -> None:
         self._annotations_dirty = dirty
@@ -861,18 +867,14 @@ class TimeSeriesViewer(QWidget):
 
         csv_path = self._last_ts_path.with_suffix(".csv")
         try:
-            with csv_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["onset", "duration", "description"])
-                writer.writeheader()
-                for annotation in sorted(self._annotations, key=lambda entry: entry.onset):
-                    writer.writerow(
-                        {
-                            "onset": f"{annotation.onset:.6f}",
-                            "duration": f"{annotation.duration:.6f}",
-                            "description": annotation.description,
-                        }
-                    )
-        except OSError as exc:
+            annotations = self._current_annotations_for_save()
+            expected_rows = self._write_annotations_csv(csv_path, annotations)
+            actual_rows = self._count_csv_rows(csv_path)
+            if actual_rows != expected_rows:
+                raise ValueError(
+                    f"Annotation CSV row count mismatch (expected {expected_rows}, got {actual_rows})."
+                )
+        except (OSError, csv.Error, ValueError) as exc:
             self.status_label.setText(f"Failed to save annotations: {exc}")
             return
 
@@ -885,8 +887,11 @@ class TimeSeriesViewer(QWidget):
             return
 
         menu = QMenu(self)
+        edit_action = menu.addAction("Edit label")
         delete_action = menu.addAction("Delete annotation")
         selected_action = menu.exec_(self.plot_widget.viewport().mapToGlobal(pos))
+        if selected_action == edit_action:
+            self._edit_annotation_description(annotation_item)
         if selected_action == delete_action:
             self._delete_annotation(annotation_item)
 
@@ -912,7 +917,7 @@ class TimeSeriesViewer(QWidget):
             values=[start, end],
             brush=pg.mkBrush(brush_color),
             pen=pg.mkPen(pen_color, width=1),
-            movable=False,
+            movable=True,
         )
         region.setZValue(10 + index)
         region.setToolTip(annotation.description)
@@ -920,11 +925,175 @@ class TimeSeriesViewer(QWidget):
         widget.addItem(region)
         return region
 
+    def _connect_annotation_region(self, annotation_item: AnnotationItem) -> None:
+        annotation_item.region.sigRegionChangeFinished.connect(
+            lambda *_: self._on_annotation_region_changed(annotation_item)
+        )
+
+    def _on_annotation_region_changed(self, annotation_item: AnnotationItem) -> None:
+        if self._syncing_annotation_regions:
+            return
+
+        region = annotation_item.region
+        start, end = region.getRegion()
+        onset, duration = self._normalize_region_values(start, end)
+        annotation_item.annotation.onset = onset
+        annotation_item.annotation.duration = duration
+        self._sync_annotation_regions(annotation_item.annotation, onset, duration, skip_region=region)
+        self._set_annotations_dirty(True)
+        self.status_label.setText("Annotation updated.")
+
+    def _normalize_region_values(self, start: float, end: float) -> tuple[float, float]:
+        if self._times is not None and self._times.size > 0:
+            data_end = float(self._times[-1])
+        else:
+            data_end = None
+
+        start = max(0.0, start)
+        end = max(0.0, end)
+        if data_end is not None:
+            start = min(start, data_end)
+            end = min(end, data_end)
+
+        onset = min(start, end)
+        duration = abs(end - start)
+        if duration < MIN_ANNOTATION_DURATION:
+            duration = MIN_ANNOTATION_DURATION
+            if data_end is not None and onset + duration > data_end:
+                onset = max(0.0, data_end - duration)
+        return onset, duration
+
+    def _sync_annotation_regions(
+        self,
+        annotation: Annotation,
+        onset: float,
+        duration: float,
+        skip_region: Optional[pg.LinearRegionItem] = None,
+    ) -> None:
+        self._syncing_annotation_regions = True
+        end = onset + duration
+        try:
+            for items in self._annotation_items_by_widget.values():
+                for item in items:
+                    if item.annotation != annotation or item.region is skip_region:
+                        continue
+                    item.region.setRegion([onset, end])
+        finally:
+            self._syncing_annotation_regions = False
+
+    def _edit_annotation_description(self, annotation_item: AnnotationItem) -> None:
+        current = annotation_item.annotation.description
+        text, ok = QInputDialog.getText(
+            self,
+            "Edit annotation label",
+            "Description:",
+            text=current,
+        )
+        description = text.strip()
+        if not ok or not description:
+            return
+
+        annotation_item.annotation.description = description
+        self._refresh_annotation_visuals(annotation_item.annotation)
+        self._update_annotation_filter_options()
+        self._set_annotations_dirty(True)
+        self.status_label.setText("Annotation label updated.")
+
+    def _refresh_annotation_visuals(self, annotation: Annotation) -> None:
+        base_color = self._color_for_description(annotation.description)
+        brush_color = pg.mkColor(base_color)
+        brush_color.setAlpha(60)
+        pen_color = pg.mkColor(base_color)
+        pen_color.setAlpha(160)
+
+        for items in self._annotation_items_by_widget.values():
+            for item in items:
+                if item.annotation != annotation:
+                    continue
+                item.region.setToolTip(annotation.description)
+                item.region.setBrush(pg.mkBrush(brush_color))
+                item.region.setPen(pg.mkPen(pen_color, width=1))
+                item.region.setVisible(self._annotation_visible(annotation))
+
+    def _current_annotations_for_save(self) -> List[Annotation]:
+        items = self._annotation_items_by_widget.get(self.plot_widget, [])
+        annotations: List[Annotation] = []
+        for item in items:
+            if item.annotation not in self._annotations:
+                continue
+            start, end = item.region.getRegion()
+            onset, duration = self._normalize_region_values(start, end)
+            item.annotation.onset = onset
+            item.annotation.duration = duration
+            if item.annotation.description:
+                annotations.append(item.annotation)
+        self._annotations = list(annotations)
+        return annotations
+
+    def _write_annotations_csv(self, csv_path: Path, annotations: List[Annotation]) -> int:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_handle = tempfile.NamedTemporaryFile(
+            "w",
+            newline="",
+            encoding="utf-8",
+            dir=csv_path.parent,
+            prefix=f"{csv_path.stem}_",
+            suffix=".tmp",
+            delete=False,
+        )
+        tmp_path = Path(tmp_handle.name)
+        expected_rows = 1
+        try:
+            writer = csv.DictWriter(
+                tmp_handle,
+                fieldnames=["onset", "duration", "description"],
+            )
+            writer.writeheader()
+            for annotation in sorted(annotations, key=lambda entry: entry.onset):
+                writer.writerow(
+                    {
+                        "onset": f"{annotation.onset:.6f}",
+                        "duration": f"{annotation.duration:.6f}",
+                        "description": annotation.description,
+                    }
+                )
+                expected_rows += 1
+            tmp_handle.flush()
+            os.fsync(tmp_handle.fileno())
+        except Exception:
+            tmp_handle.close()
+            tmp_path.unlink(missing_ok=True)
+            raise
+        tmp_handle.close()
+
+        if csv_path.exists():
+            backup_dir = csv_path.parent / "backup"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"{csv_path.stem}_{timestamp}.csv"
+            shutil.copy2(csv_path, backup_path)
+        os.replace(tmp_path, csv_path)
+        if not csv_path.exists():
+            raise OSError(f"Annotation CSV was not created at {csv_path}")
+        if csv_path.stat().st_size == 0:
+            raise OSError(f"Annotation CSV was empty at {csv_path}")
+        return expected_rows
+
+    def _count_csv_rows(self, csv_path: Path) -> int:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            return sum(1 for _ in reader)
+
     def _delete_annotation(self, annotation_item: AnnotationItem) -> None:
         if annotation_item.annotation in self._annotations:
             self._annotations.remove(annotation_item.annotation)
         self._annotation_by_region.pop(annotation_item.region, None)
         self.plot_widget.removeItem(annotation_item.region)
+        self._annotation_items_by_widget[self.plot_widget] = [
+            item
+            for item in self._annotation_items_by_widget[self.plot_widget]
+            if item is not annotation_item
+        ]
         for widget, items in self._annotation_items_by_widget.items():
             if widget is self.plot_widget:
                 continue
