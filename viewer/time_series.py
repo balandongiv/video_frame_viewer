@@ -16,6 +16,7 @@ from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -149,6 +150,8 @@ class TimeSeriesViewer(QWidget):
         self._annotation_drag_preview: Optional[pg.LinearRegionItem] = None
         self._last_annotation_description = ""
         self._annotation_filter_value = self.FILTER_ALL
+        self._ear_gain_enabled = False
+        self._ear_gain_value = 1.0
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -179,6 +182,32 @@ class TimeSeriesViewer(QWidget):
 
         control_layout.addLayout(control_row)
         control_layout.addWidget(self.channel_list)
+        gain_row = QHBoxLayout()
+        self.ear_gain_checkbox = QCheckBox("Boost EAR-avg_ear")
+        self.ear_gain_checkbox.stateChanged.connect(self._on_ear_gain_changed)
+        self.ear_gain_spinbox = QDoubleSpinBox()
+        self.ear_gain_spinbox.setRange(0.1, 100.0)
+        self.ear_gain_spinbox.setDecimals(2)
+        self.ear_gain_spinbox.setSingleStep(0.5)
+        self.ear_gain_spinbox.setValue(self._ear_gain_value)
+        self.ear_gain_spinbox.valueChanged.connect(self._on_ear_gain_changed)
+        self.ear_gain_label = QLabel(self._ear_gain_label_text())
+        self.ear_gain_x2_button = QPushButton("×2")
+        self.ear_gain_x2_button.clicked.connect(lambda: self._adjust_ear_gain(2.0))
+        self.ear_gain_x5_button = QPushButton("×5")
+        self.ear_gain_x5_button.clicked.connect(lambda: self._adjust_ear_gain(5.0))
+        self.ear_gain_x10_button = QPushButton("×10")
+        self.ear_gain_x10_button.clicked.connect(lambda: self._adjust_ear_gain(10.0))
+
+        gain_row.addWidget(self.ear_gain_checkbox)
+        gain_row.addWidget(QLabel("Gain:"))
+        gain_row.addWidget(self.ear_gain_spinbox)
+        gain_row.addWidget(self.ear_gain_x2_button)
+        gain_row.addWidget(self.ear_gain_x5_button)
+        gain_row.addWidget(self.ear_gain_x10_button)
+        gain_row.addWidget(self.ear_gain_label)
+        gain_row.addStretch()
+        control_layout.addLayout(gain_row)
         self._controls_container.setLayout(control_layout)
 
         self.plot_widget = pg.PlotWidget(background="w")
@@ -315,6 +344,8 @@ class TimeSeriesViewer(QWidget):
         data, normalized_unit = self._normalize_channel_units(
             data, picks, channel_names, channel_types
         )
+        base_channel_names = list(channel_names)
+        data, channel_names = self._apply_ear_gain(data, channel_names)
         if normalized_unit:
             self.plot_widget.setLabel("left", "Channels", units=normalized_unit)
         else:
@@ -322,7 +353,7 @@ class TimeSeriesViewer(QWidget):
 
         peak = np.nanmax(np.abs(data)) or 1.0
         spacing = peak * 2
-        offsets = self._channel_offsets(channel_names, spacing)
+        offsets = self._channel_offsets(base_channel_names, spacing)
 
         self.plot_widget.enableAutoRange()
         for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
@@ -392,6 +423,20 @@ class TimeSeriesViewer(QWidget):
         ordered_types = [channel_types[idx] for idx in indices]
         return ordered_data, ordered_picks, ordered_names, ordered_types
 
+    def _apply_ear_gain(
+        self, data: np.ndarray, channel_names: List[str]
+    ) -> tuple[np.ndarray, List[str]]:
+        if not self._ear_gain_enabled or self._ear_gain_value == 1.0:
+            return data, channel_names
+
+        adjusted = data.copy()
+        display_names = list(channel_names)
+        for idx, name in enumerate(channel_names):
+            if name == EAR_AVG_CHANNEL:
+                adjusted[idx] *= self._ear_gain_value
+                display_names[idx] = f"{name} (×{self._ear_gain_value:g})"
+        return adjusted, display_names
+
     def _channel_offsets(self, channel_names: List[str], spacing: float) -> np.ndarray:
         offsets = np.zeros(len(channel_names), dtype=float)
         pair = {PRIMARY_CHANNEL, EAR_AVG_CHANNEL}
@@ -430,6 +475,19 @@ class TimeSeriesViewer(QWidget):
             return UNIT_SCALE_FACTORS["v"]
         normalized = unit.strip().lower().replace("μ", "µ")
         return UNIT_SCALE_FACTORS.get(normalized, UNIT_SCALE_FACTORS["v"])
+
+    def _ear_gain_label_text(self) -> str:
+        status = "on" if self._ear_gain_enabled else "off"
+        return f"EAR-avg_ear gain: {self._ear_gain_value:g}× ({status})"
+
+    def _adjust_ear_gain(self, multiplier: float) -> None:
+        self.ear_gain_spinbox.setValue(self.ear_gain_spinbox.value() * multiplier)
+
+    def _on_ear_gain_changed(self, *_: object) -> None:
+        self._ear_gain_enabled = self.ear_gain_checkbox.isChecked()
+        self._ear_gain_value = float(self.ear_gain_spinbox.value())
+        self.ear_gain_label.setText(self._ear_gain_label_text())
+        self._replot()
 
     def _add_annotations_for_path(self, ts_path: Path) -> None:
         if self._times is None or self._times.size == 0:
