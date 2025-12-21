@@ -1,5 +1,6 @@
 """PyQt5 GUI for the video frame viewer application."""
 from pathlib import Path
+import re
 from typing import List, Optional
 
 from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
@@ -7,6 +8,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -23,6 +25,8 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -36,6 +40,7 @@ from viewer.utils import (
     seconds_to_frame_index,
 )
 from viewer.video_handler import VideoHandler
+from viewer.video_status import STATUS_OPTIONS, VideoStatusRecord, VideoStatusStore
 
 
 class PannableLabel(QLabel):
@@ -107,6 +112,9 @@ class VideoFrameViewer(QMainWindow):
         self.last_frame = None
         self.time_series_viewer = TimeSeriesViewer()
         self.use_test_data = False
+        self.status_store: Optional[VideoStatusStore] = None
+        self.status_records: List[VideoStatusRecord] = []
+        self.video_records_by_path: dict[Path, VideoStatusRecord] = {}
 
         self._setup_ui()
         self._setup_shortcuts()
@@ -155,6 +163,8 @@ class VideoFrameViewer(QMainWindow):
         self._main_splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(self._main_splitter)
+
+        main_layout.addWidget(self._build_video_status_tab())
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -241,6 +251,82 @@ class VideoFrameViewer(QMainWindow):
         time_series_group.setLayout(time_series_layout)
         time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         return time_series_group
+
+    def _build_video_status_tab(self) -> QGroupBox:
+        status_group = QGroupBox("Video Status")
+        status_layout = QVBoxLayout()
+        status_group.setLayout(status_layout)
+
+        editor_group = QGroupBox("Status Editor")
+        editor_layout = QGridLayout()
+        editor_group.setLayout(editor_layout)
+
+        self.status_video_label = QLabel("Selected video: -")
+        self.status_subject_label = QLabel("Subject ID: -")
+        self.status_group_label = QLabel("Recording Group ID: -")
+        self.status_segment_label = QLabel("Segment index: -")
+
+        self.status_dropdown = QComboBox()
+        self.status_dropdown.addItems(list(STATUS_OPTIONS))
+
+        self.apply_group_checkbox = QCheckBox(
+            "Apply to all segments in the same recording group"
+        )
+
+        self.status_save_button = QPushButton("Save Status")
+        self.status_save_button.clicked.connect(self._save_video_status)
+
+        editor_layout.addWidget(self.status_video_label, 0, 0, 1, 3)
+        editor_layout.addWidget(self.status_subject_label, 1, 0)
+        editor_layout.addWidget(self.status_group_label, 1, 1)
+        editor_layout.addWidget(self.status_segment_label, 1, 2)
+        editor_layout.addWidget(QLabel("Status:"), 2, 0)
+        editor_layout.addWidget(self.status_dropdown, 2, 1)
+        editor_layout.addWidget(self.status_save_button, 2, 2)
+        editor_layout.addWidget(self.apply_group_checkbox, 3, 0, 1, 3)
+
+        status_layout.addWidget(editor_group)
+
+        summary_group = QGroupBox("Per-Subject Summary")
+        summary_layout = QVBoxLayout()
+        summary_group.setLayout(summary_layout)
+
+        self.subject_summary_table = QTableWidget(0, 5)
+        self.subject_summary_table.setHorizontalHeaderLabels(
+            [
+                "Subject ID",
+                "Pending",
+                "Ongoing",
+                "Complete",
+                "Recording Groups",
+            ]
+        )
+        self.subject_summary_table.horizontalHeader().setStretchLastSection(True)
+        self.subject_summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.subject_summary_table.setSelectionMode(QTableWidget.NoSelection)
+
+        self.group_summary_table = QTableWidget(0, 5)
+        self.group_summary_table.setHorizontalHeaderLabels(
+            [
+                "Subject ID",
+                "Recording Group ID",
+                "Pending",
+                "Ongoing",
+                "Complete",
+            ]
+        )
+        self.group_summary_table.horizontalHeader().setStretchLastSection(True)
+        self.group_summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.group_summary_table.setSelectionMode(QTableWidget.NoSelection)
+
+        summary_layout.addWidget(QLabel("Subject Totals"))
+        summary_layout.addWidget(self.subject_summary_table)
+        summary_layout.addWidget(QLabel("Recording Group Breakdown"))
+        summary_layout.addWidget(self.group_summary_table)
+
+        status_layout.addWidget(summary_group)
+
+        return status_group
 
     def _build_side_tabs(self) -> QTabWidget:
         tabs = QTabWidget()
@@ -420,6 +506,7 @@ class VideoFrameViewer(QMainWindow):
 
         if not root_path.exists():
             self.video_list.clear()
+            self._reset_status_data()
             self._set_status(
                 f"Dataset root not found at {root_path}. Please choose another folder."
             )
@@ -429,6 +516,8 @@ class VideoFrameViewer(QMainWindow):
             self.video_paths = find_mov_videos(root_path)
         else:
             self.video_paths = find_md_mff_videos(root_path)
+
+        self._initialize_status_store(root_path)
 
         self.video_list.clear()
         for video_path in sorted(self.video_paths):
@@ -444,12 +533,16 @@ class VideoFrameViewer(QMainWindow):
             descriptor = "test .mov" if self.use_test_data else "MD.mff .mov"
             self._set_status(f"No {descriptor} files found in the dataset root.")
 
+        self._refresh_status_summary()
+        self._update_status_editor(None)
+
     def _load_selected_video(self) -> None:
         selected_items = self.video_list.selectedItems()
         if not selected_items:
             return
 
         video_path = Path(selected_items[0].text())
+        self._update_status_editor(video_path)
         if not self.video_handler.load(video_path):
             self._set_status("Unable to open the selected video.")
             self._update_navigation_state(False)
@@ -742,6 +835,170 @@ class VideoFrameViewer(QMainWindow):
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)
 
+    def _initialize_status_store(self, root_path: Path) -> None:
+        if self.status_store is not None:
+            self.status_store.close()
+
+        self.status_store = VideoStatusStore(root_path)
+        self.status_records = self.status_store.sync_with_videos(self.video_paths)
+        self.video_records_by_path = {
+            record.video_path: record for record in self.status_records
+        }
+
+    def _reset_status_data(self) -> None:
+        if self.status_store is not None:
+            self.status_store.close()
+        self.status_store = None
+        self.status_records = []
+        self.video_records_by_path = {}
+        self._refresh_status_summary()
+        self._update_status_editor(None)
+
+    def _selected_or_current_video(self) -> Optional[Path]:
+        selected_items = self.video_list.selectedItems()
+        if selected_items:
+            return Path(selected_items[0].text())
+        if self.video_handler.video_path:
+            return self.video_handler.video_path
+        return None
+
+    def _update_status_editor(self, video_path: Optional[Path]) -> None:
+        if video_path is None:
+            self.status_video_label.setText("Selected video: -")
+            self.status_subject_label.setText("Subject ID: -")
+            self.status_group_label.setText("Recording Group ID: -")
+            self.status_segment_label.setText("Segment index: -")
+            self.status_dropdown.setCurrentIndex(0)
+            self.status_save_button.setEnabled(False)
+            return
+
+        record = self.video_records_by_path.get(video_path)
+        if record is None:
+            self.status_video_label.setText(f"Selected video: {video_path.name}")
+            self.status_subject_label.setText("Subject ID: -")
+            self.status_group_label.setText("Recording Group ID: -")
+            self.status_segment_label.setText("Segment index: -")
+            self.status_dropdown.setCurrentIndex(0)
+            self.status_save_button.setEnabled(False)
+            return
+
+        self.status_video_label.setText(f"Selected video: {record.video_path.name}")
+        self.status_subject_label.setText(f"Subject ID: {record.subject_id}")
+        self.status_group_label.setText(
+            f"Recording Group ID: {record.recording_group_id}"
+        )
+        self.status_segment_label.setText(f"Segment index: {record.segment_index}")
+
+        status_index = STATUS_OPTIONS.index(record.status)
+        self.status_dropdown.setCurrentIndex(status_index)
+        self.status_save_button.setEnabled(True)
+
+    def _save_video_status(self) -> None:
+        if self.status_store is None:
+            self._set_status("Status database is not initialized.")
+            return
+
+        video_path = self._selected_or_current_video()
+        if video_path is None:
+            self._set_status("Select a video before updating status.")
+            return
+
+        record = self.video_records_by_path.get(video_path)
+        if record is None:
+            self._set_status("Selected video has no status record.")
+            return
+
+        status = self.status_dropdown.currentText()
+        if status not in STATUS_OPTIONS:
+            self._set_status("Invalid status selection.")
+            return
+
+        if self.apply_group_checkbox.isChecked():
+            self.status_store.update_status_for_group(record.recording_group_id, status)
+            message = (
+                f"Updated status for recording group {record.recording_group_id}."
+            )
+        else:
+            self.status_store.update_status_for_paths([record.video_path], status)
+            message = f"Updated status for {record.video_path.name}."
+
+        self.status_records = self.status_store.fetch_records(self.video_paths)
+        self.video_records_by_path = {
+            refreshed.video_path: refreshed for refreshed in self.status_records
+        }
+        self._refresh_status_summary()
+        self._update_status_editor(video_path)
+        self._set_status(message)
+
+    def _refresh_status_summary(self) -> None:
+        self.subject_summary_table.setRowCount(0)
+        self.group_summary_table.setRowCount(0)
+        if not self.status_records:
+            return
+
+        subject_counts: dict[str, dict[str, int]] = {}
+        group_counts: dict[tuple[str, str], dict[str, int]] = {}
+        subject_groups: dict[str, set[str]] = {}
+
+        for record in self.status_records:
+            subject_counts.setdefault(
+                record.subject_id, {status: 0 for status in STATUS_OPTIONS}
+            )
+            group_counts.setdefault(
+                (record.subject_id, record.recording_group_id),
+                {status: 0 for status in STATUS_OPTIONS},
+            )
+            subject_counts[record.subject_id][record.status] += 1
+            group_counts[(record.subject_id, record.recording_group_id)][
+                record.status
+            ] += 1
+            subject_groups.setdefault(record.subject_id, set()).add(
+                record.recording_group_id
+            )
+
+        def subject_sort_key(subject_id: str) -> tuple[int, str]:
+            match = re.match(r"S(\\d+)", subject_id)
+            if match:
+                return (int(match.group(1)), subject_id)
+            return (9999, subject_id)
+
+        sorted_subjects = sorted(subject_counts.keys(), key=subject_sort_key)
+        self.subject_summary_table.setRowCount(len(sorted_subjects))
+        for row, subject_id in enumerate(sorted_subjects):
+            counts = subject_counts[subject_id]
+            self.subject_summary_table.setItem(row, 0, QTableWidgetItem(subject_id))
+            self.subject_summary_table.setItem(
+                row, 1, QTableWidgetItem(str(counts["pending"]))
+            )
+            self.subject_summary_table.setItem(
+                row, 2, QTableWidgetItem(str(counts["ongoing"]))
+            )
+            self.subject_summary_table.setItem(
+                row, 3, QTableWidgetItem(str(counts["complete"]))
+            )
+            group_total = len(subject_groups.get(subject_id, set()))
+            self.subject_summary_table.setItem(
+                row, 4, QTableWidgetItem(str(group_total))
+            )
+
+        sorted_groups = sorted(
+            group_counts.keys(), key=lambda item: (subject_sort_key(item[0]), item[1])
+        )
+        self.group_summary_table.setRowCount(len(sorted_groups))
+        for row, (subject_id, group_id) in enumerate(sorted_groups):
+            counts = group_counts[(subject_id, group_id)]
+            self.group_summary_table.setItem(row, 0, QTableWidgetItem(subject_id))
+            self.group_summary_table.setItem(row, 1, QTableWidgetItem(group_id))
+            self.group_summary_table.setItem(
+                row, 2, QTableWidgetItem(str(counts["pending"]))
+            )
+            self.group_summary_table.setItem(
+                row, 3, QTableWidgetItem(str(counts["ongoing"]))
+            )
+            self.group_summary_table.setItem(
+                row, 4, QTableWidgetItem(str(counts["complete"]))
+            )
+
     def _setup_shortcuts(self) -> None:
         left_shortcut = QShortcut(QKeySequence(Qt.Key_Left), self)
         left_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -806,6 +1063,8 @@ class VideoFrameViewer(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.video_handler.release()
+        if self.status_store is not None:
+            self.status_store.close()
         super().closeEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
