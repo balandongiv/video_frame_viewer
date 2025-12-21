@@ -408,21 +408,21 @@ class TimeSeriesViewer(QWidget):
         return name.upper().startswith("EAR-")
 
     def _scale_for_channel(self, name: str, pick: int, orig_units: dict[str, str]) -> float:
-        unit = orig_units.get(name)
-        if unit:
-            return self._scale_to_target(unit)
         if self.raw is None:
             return UNIT_SCALE_FACTORS["v"]
         try:
             ch_info = self.raw.info["chs"][pick]
         except (IndexError, KeyError, TypeError):
-            return UNIT_SCALE_FACTORS["v"]
+            ch_info = {}
         unit_value = ch_info.get("unit")
         unit_mul = ch_info.get("unit_mul", 0)
-        if isinstance(unit_value, str):
-            return self._scale_to_target(unit_value)
         if unit_value == FIFF.FIFF_UNIT_V:
             return UNIT_SCALE_FACTORS["v"] * (10 ** unit_mul)
+        if isinstance(unit_value, str):
+            return self._scale_to_target(unit_value)
+        unit = orig_units.get(name)
+        if unit:
+            return self._scale_to_target(unit)
         return UNIT_SCALE_FACTORS["v"]
 
     def _scale_to_target(self, unit: str) -> float:
