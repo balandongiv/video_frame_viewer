@@ -186,9 +186,10 @@ class TimeSeriesViewer(QWidget):
         self.ear_gain_checkbox = QCheckBox("Boost EAR-avg_ear")
         self.ear_gain_checkbox.stateChanged.connect(self._on_ear_gain_changed)
         self.ear_gain_spinbox = QDoubleSpinBox()
-        self.ear_gain_spinbox.setRange(0.1, 100.0)
+        self.ear_gain_spinbox.setRange(1.0, 1.0e9)
         self.ear_gain_spinbox.setDecimals(2)
-        self.ear_gain_spinbox.setSingleStep(0.5)
+        self.ear_gain_spinbox.setSingleStep(1.0)
+        self.ear_gain_spinbox.setKeyboardTracking(True)
         self.ear_gain_spinbox.setValue(self._ear_gain_value)
         self.ear_gain_spinbox.valueChanged.connect(self._on_ear_gain_changed)
         self.ear_gain_label = QLabel(self._ear_gain_label_text())
@@ -434,7 +435,7 @@ class TimeSeriesViewer(QWidget):
         for idx, name in enumerate(channel_names):
             if name == EAR_AVG_CHANNEL:
                 adjusted[idx] *= self._ear_gain_value
-                display_names[idx] = f"{name} (×{self._ear_gain_value:g})"
+                display_names[idx] = f"{name} (×{self._format_gain(self._ear_gain_value)})"
         return adjusted, display_names
 
     def _channel_offsets(self, channel_names: List[str], spacing: float) -> np.ndarray:
@@ -478,7 +479,14 @@ class TimeSeriesViewer(QWidget):
 
     def _ear_gain_label_text(self) -> str:
         status = "on" if self._ear_gain_enabled else "off"
-        return f"EAR-avg_ear gain: {self._ear_gain_value:g}× ({status})"
+        return f"EAR-avg_ear gain: ×{self._format_gain(self._ear_gain_value)} ({status})"
+
+    def _format_gain(self, value: float) -> str:
+        if value.is_integer():
+            return f"{value:,.0f}"
+        if value >= 1e7:
+            return f"{value:,.2f}"
+        return f"{value:,.2f}"
 
     def _adjust_ear_gain(self, multiplier: float) -> None:
         self.ear_gain_spinbox.setValue(self.ear_gain_spinbox.value() * multiplier)
