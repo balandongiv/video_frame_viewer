@@ -132,7 +132,14 @@ class VideoFrameViewer(QMainWindow):
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
-        self._build_directory_controls(main_layout)
+        main_tabs = QTabWidget()
+        main_layout.addWidget(main_tabs)
+
+        main_page = QWidget()
+        main_page_layout = QVBoxLayout()
+        main_page.setLayout(main_page_layout)
+
+        self._build_directory_controls(main_page_layout)
 
         self._main_splitter = QSplitter(Qt.Vertical)
         self._main_splitter.setChildrenCollapsible(False)
@@ -162,9 +169,10 @@ class VideoFrameViewer(QMainWindow):
         self._main_splitter.setStretchFactor(0, 5)
         self._main_splitter.setStretchFactor(1, 1)
 
-        main_layout.addWidget(self._main_splitter)
+        main_page_layout.addWidget(self._main_splitter)
 
-        main_layout.addWidget(self._build_video_status_tab())
+        main_tabs.addTab(main_page, "Main")
+        main_tabs.addTab(self._build_video_status_tab(), "Video Status")
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
