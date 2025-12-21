@@ -29,6 +29,14 @@ from PyQt5.QtWidgets import (
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
 PRIMARY_CHANNEL = "EEG-E8"
 DEFAULT_VISIBLE_CHANNELS = {PRIMARY_CHANNEL}
+TARGET_PLOT_UNIT = "µV"
+UNIT_SCALE_FACTORS = {
+    "v": 1e6,
+    "mv": 1e3,
+    "uv": 1.0,
+    "µv": 1.0,
+    "nv": 1e-3,
+}
 CHANNEL_PALETTE = [
     "#d32f2f",  # primary red
     "#c62828",
@@ -296,12 +304,21 @@ class TimeSeriesViewer(QWidget):
             data = data[:, ::decimation]
             times = times[::decimation]
 
+        channel_names = [self.raw.ch_names[index] for index in picks]
+        channel_types = self.raw.get_channel_types(picks=picks)
+        data, normalized_unit = self._normalize_channel_units(
+            data, picks, channel_names, channel_types
+        )
+        if normalized_unit:
+            self.plot_widget.setLabel("left", "Channels", units=normalized_unit)
+        else:
+            self.plot_widget.setLabel("left", "Channels")
+
         peak = np.nanmax(np.abs(data)) or 1.0
         spacing = peak * 2
         offsets = np.arange(data.shape[0]) * spacing
 
         self.plot_widget.enableAutoRange()
-        channel_names = [self.raw.ch_names[index] for index in picks]
         for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
             curve = self.plot_widget.plot(
                 times, channel + offsets[idx], pen=self._pen_for_channel(channel_name, idx)
@@ -314,6 +331,59 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText(
             f"Displaying {len(picks)} of {total_channels} channel(s) from {self._last_ts_path}"
         )
+
+    def _normalize_channel_units(
+        self,
+        data: np.ndarray,
+        picks: List[int],
+        channel_names: List[str],
+        channel_types: List[str],
+    ) -> tuple[np.ndarray, Optional[str]]:
+        if self.raw is None:
+            return data, None
+
+        orig_units = getattr(self.raw, "_orig_units", {}) or {}
+        scales = np.ones(len(channel_names), dtype=float)
+        normalize_any = False
+
+        for idx, (pick, name, channel_type) in enumerate(
+            zip(picks, channel_names, channel_types)
+        ):
+            if not self._should_normalize_channel(name, channel_type):
+                continue
+            normalize_any = True
+            unit = self._unit_for_channel(name, pick, orig_units)
+            scales[idx] = self._scale_to_target(unit)
+
+        if not normalize_any:
+            return data, None
+
+        return data * scales[:, np.newaxis], TARGET_PLOT_UNIT
+
+    def _should_normalize_channel(self, name: str, channel_type: str) -> bool:
+        if channel_type in {"eeg", "eog"}:
+            return True
+        return name.upper().startswith("EAR-")
+
+    def _unit_for_channel(self, name: str, pick: int, orig_units: dict[str, str]) -> str:
+        unit = orig_units.get(name)
+        if unit:
+            return unit
+        if self.raw is None:
+            return "V"
+        try:
+            unit = self.raw.info["chs"][pick].get("unit")
+        except (IndexError, KeyError, TypeError):
+            return "V"
+        if isinstance(unit, str):
+            return unit
+        return "V"
+
+    def _scale_to_target(self, unit: str) -> float:
+        if not unit:
+            return UNIT_SCALE_FACTORS["v"]
+        normalized = unit.strip().lower().replace("μ", "µ")
+        return UNIT_SCALE_FACTORS.get(normalized, UNIT_SCALE_FACTORS["v"])
 
     def _add_annotations_for_path(self, ts_path: Path) -> None:
         if self._times is None or self._times.size == 0:
