@@ -11,6 +11,7 @@ from typing import List, Optional, Set
 import mne
 import numpy as np
 import pyqtgraph as pg
+from mne.io.constants import FIFF
 from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -28,7 +29,8 @@ from PyQt5.QtWidgets import (
 
 PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
 PRIMARY_CHANNEL = "EEG-E8"
-DEFAULT_VISIBLE_CHANNELS = {PRIMARY_CHANNEL}
+EAR_AVG_CHANNEL = "EAR-avg_ear"
+DEFAULT_VISIBLE_CHANNELS = {PRIMARY_CHANNEL, EAR_AVG_CHANNEL}
 TARGET_PLOT_UNIT = "µV"
 UNIT_SCALE_FACTORS = {
     "v": 1e6,
@@ -37,6 +39,7 @@ UNIT_SCALE_FACTORS = {
     "µv": 1.0,
     "nv": 1e-3,
 }
+PAIR_GAP_MULTIPLIER = 0.5
 CHANNEL_PALETTE = [
     "#d32f2f",  # primary red
     "#c62828",
@@ -306,6 +309,9 @@ class TimeSeriesViewer(QWidget):
 
         channel_names = [self.raw.ch_names[index] for index in picks]
         channel_types = self.raw.get_channel_types(picks=picks)
+        data, picks, channel_names, channel_types = self._order_channels_for_display(
+            data, picks, channel_names, channel_types
+        )
         data, normalized_unit = self._normalize_channel_units(
             data, picks, channel_names, channel_types
         )
@@ -316,7 +322,7 @@ class TimeSeriesViewer(QWidget):
 
         peak = np.nanmax(np.abs(data)) or 1.0
         spacing = peak * 2
-        offsets = np.arange(data.shape[0]) * spacing
+        offsets = self._channel_offsets(channel_names, spacing)
 
         self.plot_widget.enableAutoRange()
         for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
@@ -352,32 +358,72 @@ class TimeSeriesViewer(QWidget):
             if not self._should_normalize_channel(name, channel_type):
                 continue
             normalize_any = True
-            unit = self._unit_for_channel(name, pick, orig_units)
-            scales[idx] = self._scale_to_target(unit)
+            scales[idx] = self._scale_for_channel(name, pick, orig_units)
 
         if not normalize_any:
             return data, None
 
         return data * scales[:, np.newaxis], TARGET_PLOT_UNIT
 
+    def _order_channels_for_display(
+        self,
+        data: np.ndarray,
+        picks: List[int],
+        channel_names: List[str],
+        channel_types: List[str],
+    ) -> tuple[np.ndarray, List[int], List[str], List[str]]:
+        if PRIMARY_CHANNEL not in channel_names or EAR_AVG_CHANNEL not in channel_names:
+            return data, picks, channel_names, channel_types
+
+        indices = list(range(len(channel_names)))
+        eeg_index = channel_names.index(PRIMARY_CHANNEL)
+        ear_index = channel_names.index(EAR_AVG_CHANNEL)
+        insert_at = min(eeg_index, ear_index)
+
+        for idx in sorted({eeg_index, ear_index}, reverse=True):
+            indices.pop(idx)
+
+        ordered_pair = [eeg_index, ear_index]
+        indices[insert_at:insert_at] = ordered_pair
+
+        ordered_data = data[indices]
+        ordered_picks = [picks[idx] for idx in indices]
+        ordered_names = [channel_names[idx] for idx in indices]
+        ordered_types = [channel_types[idx] for idx in indices]
+        return ordered_data, ordered_picks, ordered_names, ordered_types
+
+    def _channel_offsets(self, channel_names: List[str], spacing: float) -> np.ndarray:
+        offsets = np.zeros(len(channel_names), dtype=float)
+        pair = {PRIMARY_CHANNEL, EAR_AVG_CHANNEL}
+        for idx in range(1, len(channel_names)):
+            prev_name = channel_names[idx - 1]
+            curr_name = channel_names[idx]
+            gap = spacing * PAIR_GAP_MULTIPLIER if {prev_name, curr_name} == pair else spacing
+            offsets[idx] = offsets[idx - 1] + gap
+        return offsets
+
     def _should_normalize_channel(self, name: str, channel_type: str) -> bool:
         if channel_type in {"eeg", "eog"}:
             return True
         return name.upper().startswith("EAR-")
 
-    def _unit_for_channel(self, name: str, pick: int, orig_units: dict[str, str]) -> str:
+    def _scale_for_channel(self, name: str, pick: int, orig_units: dict[str, str]) -> float:
         unit = orig_units.get(name)
         if unit:
-            return unit
+            return self._scale_to_target(unit)
         if self.raw is None:
-            return "V"
+            return UNIT_SCALE_FACTORS["v"]
         try:
-            unit = self.raw.info["chs"][pick].get("unit")
+            ch_info = self.raw.info["chs"][pick]
         except (IndexError, KeyError, TypeError):
-            return "V"
-        if isinstance(unit, str):
-            return unit
-        return "V"
+            return UNIT_SCALE_FACTORS["v"]
+        unit_value = ch_info.get("unit")
+        unit_mul = ch_info.get("unit_mul", 0)
+        if isinstance(unit_value, str):
+            return self._scale_to_target(unit_value)
+        if unit_value == FIFF.FIFF_UNIT_V:
+            return UNIT_SCALE_FACTORS["v"] * (10 ** unit_mul)
+        return UNIT_SCALE_FACTORS["v"]
 
     def _scale_to_target(self, unit: str) -> float:
         if not unit:
