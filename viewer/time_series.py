@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -40,7 +41,8 @@ UNIT_SCALE_FACTORS = {
     "µv": 1.0,
     "nv": 1e-3,
 }
-PAIR_GAP_MULTIPLIER = 0.5
+MIN_LANE_HEIGHT = 140
+LANE_PADDING_RATIO = 0.05
 CHANNEL_PALETTE = [
     "#d32f2f",  # primary red
     "#c62828",
@@ -131,7 +133,6 @@ class TimeSeriesViewer(QWidget):
         super().__init__(parent)
         self.max_points = max_points
         self.raw: Optional[mne.io.BaseRaw] = None
-        self._plotted_curves: List[pg.PlotDataItem] = []
         self._times: Optional[np.ndarray] = None
         self._selected_channels: Set[str] = set()
         self._last_cursor_time: float = 0.0
@@ -140,7 +141,6 @@ class TimeSeriesViewer(QWidget):
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
         self.processed_root: Path = PROCESSED_ROOT
-        self._annotation_items: List[AnnotationItem] = []
         self._annotation_by_region: dict[pg.LinearRegionItem, AnnotationItem] = {}
         self._annotation_colors: dict[str, pg.Color] = {}
         self._annotations: List[Annotation] = []
@@ -152,11 +152,11 @@ class TimeSeriesViewer(QWidget):
         self._annotation_filter_value = self.FILTER_ALL
         self._ear_gain_enabled = False
         self._ear_gain_value = 1.0
-        self._secondary_plot_widget: Optional[pg.PlotWidget] = None
-        self._secondary_curves: List[pg.PlotDataItem] = []
-        self._secondary_cursor_line: Optional[pg.InfiniteLine] = None
-        self._secondary_annotation_items: List[AnnotationItem] = []
-        self._two_lane_mode = False
+        self._lane_widgets: List[pg.PlotWidget] = []
+        self._lane_curves: dict[pg.PlotWidget, List[pg.PlotDataItem]] = {}
+        self._lane_cursor_lines: dict[pg.PlotWidget, pg.InfiniteLine] = {}
+        self._lane_series: dict[pg.PlotWidget, tuple[np.ndarray, np.ndarray]] = {}
+        self._annotation_items_by_widget: dict[pg.PlotWidget, List[AnnotationItem]] = {}
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -221,6 +221,7 @@ class TimeSeriesViewer(QWidget):
         self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("r", width=2))
         self.plot_widget.addItem(self.cursor_line)
         self.cursor_line.hide()
+        self._register_lane_widget(self.plot_widget, self.cursor_line)
 
         self._plot_container = QWidget()
         self._plot_layout = QVBoxLayout()
@@ -228,6 +229,10 @@ class TimeSeriesViewer(QWidget):
         self._plot_layout.setSpacing(2)
         self._plot_layout.addWidget(self.plot_widget)
         self._plot_container.setLayout(self._plot_layout)
+        self._plot_scroll_area = QScrollArea()
+        self._plot_scroll_area.setWidgetResizable(True)
+        self._plot_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._plot_scroll_area.setWidget(self._plot_container)
 
         annotation_controls = QWidget()
         annotation_layout = QHBoxLayout()
@@ -256,7 +261,7 @@ class TimeSeriesViewer(QWidget):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        layout.addWidget(self._plot_container)
+        layout.addWidget(self._plot_scroll_area)
         layout.addWidget(annotation_controls)
         layout.addWidget(self.status_label)
         layout.setStretch(0, 1)
@@ -350,84 +355,46 @@ class TimeSeriesViewer(QWidget):
         data, picks, channel_names, channel_types = self._order_channels_for_display(
             data, picks, channel_names, channel_types
         )
-        two_lane = len(picks) == 2 and {PRIMARY_CHANNEL, EAR_AVG_CHANNEL} == set(channel_names)
-        data, picks, channel_names, channel_types = self._order_channels_for_display(
-            data, picks, channel_names, channel_types
-        )
+        lane_count = len(channel_names)
         data, normalized_unit = self._normalize_channel_units(
             data, picks, channel_names, channel_types
         )
-        base_channel_names = list(channel_names)
         data, channel_names = self._apply_ear_gain(data, channel_names)
-        self._set_two_lane_mode(two_lane)
 
-        if two_lane:
-            self._plot_two_lane(
-                data,
-                times,
-                channel_names,
-                normalized_unit,
-            )
-            total_channels = len(self.raw.ch_names) if self.raw else len(picks)
-            self.status_label.setText(
-                f"Displaying {len(picks)} of {total_channels} channel(s) from {self._last_ts_path}"
-            )
-            self.cursor_line.show()
-            if self._secondary_cursor_line is not None:
-                self._secondary_cursor_line.show()
-            return
+        self._ensure_lane_count(lane_count)
+        self._plot_lane_data(
+            data,
+            times,
+            channel_names,
+            normalized_unit,
+        )
+        self._sync_lane_annotations()
 
-        if normalized_unit:
-            self.plot_widget.setLabel("left", "Channels", units=normalized_unit)
-        else:
-            self.plot_widget.setLabel("left", "Channels")
-
-        peak = np.nanmax(np.abs(data)) or 1.0
-        spacing = peak * 2
-        offsets = self._channel_offsets(base_channel_names, spacing)
-
-        self.plot_widget.enableAutoRange()
-        for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
-            curve = self.plot_widget.plot(
-                times, channel + offsets[idx], pen=self._pen_for_channel(channel_name, idx)
-            )
-            curve.setDownsampling(auto=True, method="peak")
-            self._plotted_curves.append(curve)
-
-        self.cursor_line.show()
+        for cursor_line in self._lane_cursor_lines.values():
+            cursor_line.show()
         total_channels = len(self.raw.ch_names) if self.raw else len(picks)
         self.status_label.setText(
             f"Displaying {len(picks)} of {total_channels} channel(s) from {self._last_ts_path}"
         )
 
-    def _plot_two_lane(
+    def _plot_lane_data(
         self,
         data: np.ndarray,
         times: np.ndarray,
         channel_names: List[str],
         units: Optional[str],
     ) -> None:
-        if self._secondary_plot_widget is None:
-            return
-
-        self.plot_widget.enableAutoRange()
-        self._secondary_plot_widget.enableAutoRange()
-        self._plot_single_lane(
-            self.plot_widget,
-            data[0],
-            times,
-            channel_names[0],
-            units,
-            show_bottom_axis=False,
-        )
-        self._plot_single_lane(
-            self._secondary_plot_widget,
-            data[1],
-            times,
-            channel_names[1],
-            units,
-            show_bottom_axis=True,
-        )
+        for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
+            widget = self._lane_widgets[idx]
+            show_bottom_axis = idx == len(channel_names) - 1
+            self._plot_single_lane(
+                widget,
+                channel,
+                times,
+                channel_name,
+                units,
+                show_bottom_axis=show_bottom_axis,
+            )
 
     def _plot_single_lane(
         self,
@@ -450,10 +417,8 @@ class TimeSeriesViewer(QWidget):
             widget.setLabel("left", channel_name)
         curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
         curve.setDownsampling(auto=True, method="peak")
-        if widget is self.plot_widget:
-            self._plotted_curves.append(curve)
-        else:
-            self._secondary_curves.append(curve)
+        self._lane_curves[widget].append(curve)
+        self._lane_series[widget] = (times, channel)
 
     def _normalize_channel_units(
         self,
@@ -509,67 +474,6 @@ class TimeSeriesViewer(QWidget):
         ordered_types = [channel_types[idx] for idx in indices]
         return ordered_data, ordered_picks, ordered_names, ordered_types
 
-    def _set_two_lane_mode(self, enabled: bool) -> None:
-        if enabled == self._two_lane_mode:
-            return
-        self._two_lane_mode = enabled
-        if enabled:
-            self._ensure_secondary_plot()
-            if self._secondary_plot_widget is not None:
-                self._secondary_plot_widget.setVisible(True)
-            self._sync_secondary_annotations()
-        else:
-            if self._secondary_plot_widget is not None:
-                self._secondary_plot_widget.setVisible(False)
-                for item in self._secondary_annotation_items:
-                    self._secondary_plot_widget.removeItem(item.region)
-            self._secondary_annotation_items.clear()
-
-    def _ensure_secondary_plot(self) -> None:
-        if self._secondary_plot_widget is not None:
-            return
-        self._secondary_plot_widget = pg.PlotWidget(background="w")
-        self._configure_plot_widget(self._secondary_plot_widget)
-        self._secondary_plot_widget.setXLink(self.plot_widget)
-        self._secondary_cursor_line = pg.InfiniteLine(
-            angle=90, movable=False, pen=pg.mkPen("r", width=2)
-        )
-        self._secondary_plot_widget.addItem(self._secondary_cursor_line)
-        self._secondary_cursor_line.hide()
-        self._plot_layout.addWidget(self._secondary_plot_widget)
-
-    def _sync_secondary_annotations(self) -> None:
-        if self._secondary_plot_widget is None:
-            return
-        for item in self._secondary_annotation_items:
-            self._secondary_plot_widget.removeItem(item.region)
-        self._secondary_annotation_items.clear()
-        if self._times is None or self._times.size == 0:
-            return
-        data_end = float(self._times[-1])
-        for annotation in self._annotations:
-            start = max(0.0, annotation.onset)
-            end = min(annotation.onset + annotation.duration, data_end)
-            if end <= start:
-                continue
-            base_color = self._color_for_description(annotation.description)
-            brush_color = pg.mkColor(base_color)
-            brush_color.setAlpha(60)
-            pen_color = pg.mkColor(base_color)
-            pen_color.setAlpha(160)
-            region = self._create_annotation_region(
-                annotation,
-                start,
-                end,
-                brush_color,
-                pen_color,
-                self._secondary_plot_widget,
-                len(self._secondary_annotation_items),
-            )
-            self._secondary_annotation_items.append(
-                AnnotationItem(annotation=annotation, region=region)
-            )
-
     def _apply_ear_gain(
         self, data: np.ndarray, channel_names: List[str]
     ) -> tuple[np.ndarray, List[str]]:
@@ -583,16 +487,6 @@ class TimeSeriesViewer(QWidget):
                 adjusted[idx] *= self._ear_gain_value
                 display_names[idx] = f"{name} (×{self._format_gain(self._ear_gain_value)})"
         return adjusted, display_names
-
-    def _channel_offsets(self, channel_names: List[str], spacing: float) -> np.ndarray:
-        offsets = np.zeros(len(channel_names), dtype=float)
-        pair = {PRIMARY_CHANNEL, EAR_AVG_CHANNEL}
-        for idx in range(1, len(channel_names)):
-            prev_name = channel_names[idx - 1]
-            curr_name = channel_names[idx]
-            gap = spacing * PAIR_GAP_MULTIPLIER if {prev_name, curr_name} == pair else spacing
-            offsets[idx] = offsets[idx - 1] + gap
-        return offsets
 
     def _should_normalize_channel(self, name: str, channel_type: str) -> bool:
         if channel_type in {"eeg", "eog"}:
@@ -627,6 +521,7 @@ class TimeSeriesViewer(QWidget):
         widget.showGrid(x=True, y=True, alpha=0.3)
         widget.setLabel("bottom", "Time", units="s")
         widget.setLabel("left", "Channels")
+        widget.getPlotItem().getAxis("left").setWidth(60)
         widget.viewport().installEventFilter(self)
 
     def _ear_gain_label_text(self) -> str:
@@ -808,19 +703,13 @@ class TimeSeriesViewer(QWidget):
             x_max = data_end
             x_min = max(0.0, data_end - self.view_span_seconds)
 
-        self.plot_widget.setXRange(x_min, x_max, padding=0)
-        if self._secondary_plot_widget is not None and self._secondary_plot_widget.isVisible():
-            self._secondary_plot_widget.setXRange(x_min, x_max, padding=0)
+        for widget in self._lane_widgets:
+            widget.setXRange(x_min, x_max, padding=0)
         center = (x_min + x_max) / 2 if x_max > x_min else self._last_cursor_time
-        self.cursor_line.setPos(center)
-        self.cursor_line.show()
-        if self._secondary_cursor_line is not None and self._secondary_plot_widget is not None:
-            if self._secondary_plot_widget.isVisible():
-                self._secondary_cursor_line.setPos(center)
-                self._secondary_cursor_line.show()
-        self.plot_widget.enableAutoRange(y=True)
-        if self._secondary_plot_widget is not None and self._secondary_plot_widget.isVisible():
-            self._secondary_plot_widget.enableAutoRange(y=True)
+        for cursor_line in self._lane_cursor_lines.values():
+            cursor_line.setPos(center)
+            cursor_line.show()
+        self._update_lane_scales(x_min, x_max)
 
     def _max_span_seconds(self) -> float:
         if self._times is None or self._times.size == 0:
@@ -829,29 +718,21 @@ class TimeSeriesViewer(QWidget):
         return max(self.min_span_seconds, duration)
 
     def _clear_plot(self, hide_cursor: bool = True) -> None:
-        for curve in self._plotted_curves:
-            self.plot_widget.removeItem(curve)
-        self._plotted_curves.clear()
-        self.plot_widget.enableAutoRange()
-        if self._secondary_plot_widget is not None:
-            for curve in self._secondary_curves:
-                self._secondary_plot_widget.removeItem(curve)
-            self._secondary_curves.clear()
-            self._secondary_plot_widget.enableAutoRange()
+        for widget, curves in self._lane_curves.items():
+            for curve in curves:
+                widget.removeItem(curve)
+            curves.clear()
+        self._lane_series.clear()
         if hide_cursor:
-            self.cursor_line.hide()
-            if self._secondary_cursor_line is not None:
-                self._secondary_cursor_line.hide()
+            for cursor_line in self._lane_cursor_lines.values():
+                cursor_line.hide()
 
     def _clear_annotations(self) -> None:
-        for item in self._annotation_items:
-            self.plot_widget.removeItem(item.region)
-        self._annotation_items.clear()
+        for widget, items in self._annotation_items_by_widget.items():
+            for item in items:
+                widget.removeItem(item.region)
+            items.clear()
         self._annotation_by_region.clear()
-        if self._secondary_plot_widget is not None:
-            for item in self._secondary_annotation_items:
-                self._secondary_plot_widget.removeItem(item.region)
-            self._secondary_annotation_items.clear()
         if self._annotation_drag_preview is not None:
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None
@@ -899,14 +780,12 @@ class TimeSeriesViewer(QWidget):
         return super().eventFilter(obj, event)
 
     def _plot_viewports(self) -> set[object]:
-        viewports = {self.plot_widget.viewport()}
-        if self._secondary_plot_widget is not None:
-            viewports.add(self._secondary_plot_widget.viewport())
-        return viewports
+        return {widget.viewport() for widget in self._lane_widgets}
 
     def _widget_for_viewport(self, viewport: object) -> pg.PlotWidget:
-        if self._secondary_plot_widget is not None and viewport is self._secondary_plot_widget.viewport():
-            return self._secondary_plot_widget
+        for widget in self._lane_widgets:
+            if viewport is widget.viewport():
+                return widget
         return self.plot_widget
 
     def _time_at_position(self, pos, widget: Optional[pg.PlotWidget] = None) -> Optional[float]:
@@ -946,23 +825,26 @@ class TimeSeriesViewer(QWidget):
             brush_color,
             pen_color,
             self.plot_widget,
-            len(self._annotation_items),
+            len(self._annotation_items_by_widget[self.plot_widget]),
         )
         item = AnnotationItem(annotation=annotation, region=region)
-        self._annotation_items.append(item)
+        self._annotation_items_by_widget[self.plot_widget].append(item)
         self._annotation_by_region[region] = item
-        if self._secondary_plot_widget is not None and self._secondary_plot_widget.isVisible():
-            secondary_region = self._create_annotation_region(
+        for widget in self._lane_widgets:
+            if widget is self.plot_widget:
+                continue
+            region = self._create_annotation_region(
                 annotation,
                 start,
                 end,
                 brush_color,
                 pen_color,
-                self._secondary_plot_widget,
-                len(self._secondary_annotation_items),
+                widget,
+                len(self._annotation_items_by_widget[widget]),
             )
-            secondary_item = AnnotationItem(annotation=annotation, region=secondary_region)
-            self._secondary_annotation_items.append(secondary_item)
+            self._annotation_items_by_widget[widget].append(
+                AnnotationItem(annotation=annotation, region=region)
+            )
 
     def _set_annotations_dirty(self, dirty: bool) -> None:
         self._annotations_dirty = dirty
@@ -1041,15 +923,15 @@ class TimeSeriesViewer(QWidget):
     def _delete_annotation(self, annotation_item: AnnotationItem) -> None:
         if annotation_item.annotation in self._annotations:
             self._annotations.remove(annotation_item.annotation)
-        if annotation_item in self._annotation_items:
-            self._annotation_items.remove(annotation_item)
         self._annotation_by_region.pop(annotation_item.region, None)
         self.plot_widget.removeItem(annotation_item.region)
-        if self._secondary_plot_widget is not None:
-            for secondary in list(self._secondary_annotation_items):
-                if secondary.annotation == annotation_item.annotation:
-                    self._secondary_plot_widget.removeItem(secondary.region)
-                    self._secondary_annotation_items.remove(secondary)
+        for widget, items in self._annotation_items_by_widget.items():
+            if widget is self.plot_widget:
+                continue
+            for lane_item in list(items):
+                if lane_item.annotation == annotation_item.annotation:
+                    widget.removeItem(lane_item.region)
+                    items.remove(lane_item)
         self._set_annotations_dirty(True)
         self._update_annotation_filter_options()
         self.status_label.setText("Annotation deleted.")
@@ -1215,10 +1097,9 @@ class TimeSeriesViewer(QWidget):
         ]
 
     def _apply_annotation_filter(self) -> None:
-        for item in self._annotation_items:
-            item.region.setVisible(self._annotation_visible(item.annotation))
-        for item in self._secondary_annotation_items:
-            item.region.setVisible(self._annotation_visible(item.annotation))
+        for items in self._annotation_items_by_widget.values():
+            for item in items:
+                item.region.setVisible(self._annotation_visible(item.annotation))
 
     def _update_annotation_filter_options(self, force_all: bool = False) -> None:
         descriptions = sorted({annotation.description for annotation in self._annotations})
@@ -1246,3 +1127,86 @@ class TimeSeriesViewer(QWidget):
         self.annotation_filter_combo.blockSignals(False)
         self._annotation_filter_value = self.annotation_filter_combo.currentData()
         self._apply_annotation_filter()
+
+    def _sync_lane_annotations(self) -> None:
+        if not self._annotations:
+            return
+        for widget, items in self._annotation_items_by_widget.items():
+            for item in items:
+                widget.removeItem(item.region)
+            items.clear()
+        self._annotation_by_region.clear()
+        for annotation in self._annotations:
+            self._render_annotation(annotation)
+        self._apply_annotation_filter()
+
+    def _register_lane_widget(self, widget: pg.PlotWidget, cursor_line: pg.InfiniteLine) -> None:
+        if widget not in self._lane_widgets:
+            self._lane_widgets.append(widget)
+        self._lane_curves.setdefault(widget, [])
+        self._lane_cursor_lines[widget] = cursor_line
+        self._annotation_items_by_widget.setdefault(widget, [])
+
+    def _ensure_lane_count(self, lane_count: int) -> None:
+        lane_count = max(1, lane_count)
+        while len(self._lane_widgets) < lane_count:
+            widget = pg.PlotWidget(background="w")
+            self._configure_plot_widget(widget)
+            widget.setXLink(self.plot_widget)
+            cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("r", width=2))
+            widget.addItem(cursor_line)
+            cursor_line.hide()
+            self._plot_layout.addWidget(widget)
+            self._register_lane_widget(widget, cursor_line)
+        while len(self._lane_widgets) > lane_count:
+            widget = self._lane_widgets.pop()
+            for item in self._annotation_items_by_widget.get(widget, []):
+                widget.removeItem(item.region)
+            for curve in self._lane_curves.get(widget, []):
+                widget.removeItem(curve)
+            cursor_line = self._lane_cursor_lines.pop(widget, None)
+            if cursor_line is not None:
+                widget.removeItem(cursor_line)
+            self._annotation_items_by_widget.pop(widget, None)
+            self._lane_curves.pop(widget, None)
+            self._lane_series.pop(widget, None)
+            self._plot_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        self._update_lane_layout()
+
+    def _update_lane_layout(self) -> None:
+        for idx, widget in enumerate(self._lane_widgets):
+            self._plot_layout.setStretch(idx, 1)
+            widget.setMinimumHeight(MIN_LANE_HEIGHT)
+        total_height = len(self._lane_widgets) * MIN_LANE_HEIGHT
+        if len(self._lane_widgets) > 1:
+            total_height += self._plot_layout.spacing() * (len(self._lane_widgets) - 1)
+        self._plot_container.setMinimumHeight(total_height)
+
+    def _update_lane_scales(self, x_min: float, x_max: float) -> None:
+        for widget, series in self._lane_series.items():
+            times, channel = series
+            if times.size == 0:
+                continue
+            start = int(np.searchsorted(times, x_min, side="left"))
+            end = int(np.searchsorted(times, x_max, side="right"))
+            window = channel[start:end]
+            if window.size == 0:
+                window = channel
+            y_min, y_max = self._robust_range(window)
+            widget.setYRange(y_min, y_max, padding=0)
+
+    def _robust_range(self, data: np.ndarray) -> tuple[float, float]:
+        finite = data[np.isfinite(data)]
+        if finite.size == 0:
+            return -1.0, 1.0
+        lower, upper = np.nanpercentile(finite, [1, 99])
+        if not math.isfinite(lower) or not math.isfinite(upper):
+            lower = float(np.nanmin(finite))
+            upper = float(np.nanmax(finite))
+        if lower == upper:
+            span = max(abs(lower), 1.0)
+            return lower - span, upper + span
+        padding = (upper - lower) * LANE_PADDING_RATIO
+        return lower - padding, upper + padding
