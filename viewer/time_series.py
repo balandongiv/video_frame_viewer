@@ -20,9 +20,11 @@ from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
+    QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -982,15 +984,11 @@ class TimeSeriesViewer(QWidget):
             self._syncing_annotation_regions = False
 
     def _edit_annotation_description(self, annotation_item: AnnotationItem) -> None:
-        current = annotation_item.annotation.description
-        text, ok = QInputDialog.getText(
-            self,
-            "Edit annotation label",
-            "Description:",
-            text=current,
+        description = self._prompt_for_description(
+            title="Edit annotation label",
+            current_value=annotation_item.annotation.description,
         )
-        description = text.strip()
-        if not ok or not description:
+        if not description:
             return
 
         annotation_item.annotation.description = description
@@ -1174,19 +1172,48 @@ class TimeSeriesViewer(QWidget):
 
         self._reset_annotation_drag()
 
-    def _prompt_for_description(self) -> str:
-        default = self._last_annotation_description or ""
-        text, ok = QInputDialog.getText(
-            self,
-            "Add annotation",
-            "Description:",
-            text=default,
-        )
-        description = text.strip()
-        if ok and description:
-            self._last_annotation_description = description
-            return description
-        return ""
+    def _prompt_for_description(self, title: str = "Add annotation", current_value: str = "") -> str:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+
+        layout = QVBoxLayout(dialog)
+        form_layout = QFormLayout()
+        label_combo = QComboBox(dialog)
+        label_combo.setEditable(True)
+        label_combo.setInsertPolicy(QComboBox.NoInsert)
+
+        labels = sorted({annotation.description for annotation in self._annotations if annotation.description})
+        label_combo.addItems(labels)
+
+        initial_value = current_value or self._last_annotation_description or ""
+        if initial_value:
+            if initial_value not in labels:
+                label_combo.insertItem(0, initial_value)
+            label_combo.setCurrentText(initial_value)
+        else:
+            label_combo.setCurrentText("")
+
+        line_edit = label_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Select an existing label or type a new one")
+
+        form_layout.addRow("Label:", label_combo)
+        layout.addLayout(form_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return ""
+
+        description = label_combo.currentText().strip()
+        if not description:
+            return ""
+
+        self._last_annotation_description = description
+        return description
 
     def _reset_annotation_drag(self) -> None:
         self._annotation_dragging = False
