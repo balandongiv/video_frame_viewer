@@ -16,7 +16,7 @@ import mne
 import numpy as np
 import pyqtgraph as pg
 from mne.io.constants import FIFF
-from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -576,6 +576,7 @@ class TimeSeriesViewer(QWidget):
         widget.setLabel("left", "Channels")
         widget.getPlotItem().getAxis("left").setWidth(60)
         widget.viewport().installEventFilter(self)
+        widget.setFocusPolicy(Qt.StrongFocus)
 
     def _ear_gain_label_text(self) -> str:
         status = "on" if self._ear_gain_enabled else "off"
@@ -926,6 +927,7 @@ class TimeSeriesViewer(QWidget):
     def _save_annotations(self) -> None:
         if self._last_ts_path is None:
             self.status_label.setText("No time series loaded to save annotations.")
+            self._restore_plot_focus()
             return
 
         csv_path = self._last_ts_path.with_suffix(".csv")
@@ -939,10 +941,25 @@ class TimeSeriesViewer(QWidget):
                 )
         except (OSError, csv.Error, ValueError) as exc:
             self.status_label.setText(f"Failed to save annotations: {exc}")
+            self._restore_plot_focus()
             return
 
         self.status_label.setText(f"Saved annotations to {csv_path}.")
         self._set_annotations_dirty(False)
+        self._restore_plot_focus()
+
+    def save_annotations(self) -> None:
+        """Public handler to save annotations and maintain focus."""
+        self._save_annotations()
+
+    def _restore_plot_focus(self) -> None:
+        if self.plot_widget is None:
+            return
+
+        def focus_plot() -> None:
+            self.plot_widget.setFocus(Qt.OtherFocusReason)
+
+        QTimer.singleShot(0, focus_plot)
 
     def _handle_annotation_context_menu(self, pos) -> None:
         annotation_item = self._annotation_item_at(pos)
