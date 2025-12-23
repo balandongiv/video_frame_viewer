@@ -292,7 +292,7 @@ class TimeSeriesViewer(QWidget):
         right_layout = QHBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addStretch()
-        right_layout.addWidget(self._build_annotation_nudge_controls())
+        right_layout.addWidget(self._build_annotation_nudge_group())
         right_layout.addWidget(QLabel("Shortcuts: [ or P = prev, ] or N = next"))
         right_controls.setLayout(right_layout)
 
@@ -1473,6 +1473,16 @@ class TimeSeriesViewer(QWidget):
         self._lane_baselines[widget] = baseline
         self._lane_baseline_kind[widget] = baseline_kind
 
+    def _build_annotation_nudge_group(self) -> QWidget:
+        nudge_group = QWidget()
+        nudge_layout = QVBoxLayout()
+        nudge_layout.setContentsMargins(0, 0, 0, 0)
+        nudge_layout.setSpacing(4)
+        nudge_layout.addWidget(self._build_annotation_nudge_controls())
+        nudge_layout.addWidget(self._build_bulk_annotation_nudge_controls())
+        nudge_group.setLayout(nudge_layout)
+        return nudge_group
+
     def _build_annotation_nudge_controls(self) -> QWidget:
         nudge_container = QWidget()
         layout = QHBoxLayout()
@@ -1490,6 +1500,20 @@ class TimeSeriesViewer(QWidget):
         self.nudge_forward_button.clicked.connect(lambda: self._nudge_selected_annotation(1))
         layout.addWidget(self.nudge_back_button)
         layout.addWidget(self.nudge_forward_button)
+        nudge_container.setLayout(layout)
+        return nudge_container
+
+    def _build_bulk_annotation_nudge_controls(self) -> QWidget:
+        nudge_container = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Bulk Nudge (All Annotations)"))
+        self.bulk_nudge_back_button = QPushButton("− Bulk Nudge")
+        self.bulk_nudge_back_button.clicked.connect(lambda: self._nudge_all_annotations(-1))
+        self.bulk_nudge_forward_button = QPushButton("+ Bulk Nudge")
+        self.bulk_nudge_forward_button.clicked.connect(lambda: self._nudge_all_annotations(1))
+        layout.addWidget(self.bulk_nudge_back_button)
+        layout.addWidget(self.bulk_nudge_forward_button)
         nudge_container.setLayout(layout)
         return nudge_container
 
@@ -1522,6 +1546,35 @@ class TimeSeriesViewer(QWidget):
         self._set_annotations_dirty(True)
         self.status_label.setText(
             f"Nudged annotation '{annotation.description}' to {annotation.onset:.2f}s."
+        )
+
+    def _nudge_all_annotations(self, direction: int) -> None:
+        if not self._annotations:
+            self.status_label.setText("No annotations available to nudge.")
+            return
+        if direction == 0:
+            return
+        step_frames = self.annotation_nudge_spinbox.value()
+        delta_seconds = (step_frames / ANNOTATION_NUDGE_FPS) * (1 if direction > 0 else -1)
+        data_end = None
+        if self._times is not None and self._times.size > 0:
+            data_end = float(self._times[-1])
+
+        for annotation in self._annotations:
+            duration = annotation.duration
+            new_onset = annotation.onset + delta_seconds
+            if data_end is not None:
+                max_onset = max(0.0, data_end - duration)
+                new_onset = max(0.0, min(new_onset, max_onset))
+            else:
+                new_onset = max(0.0, new_onset)
+            annotation.onset = new_onset
+            self._sync_annotation_regions(annotation, new_onset, duration)
+
+        self._set_annotations_dirty(True)
+        direction_label = "later" if direction > 0 else "earlier"
+        self.status_label.setText(
+            f"Nudged all annotations {direction_label} by {step_frames} frame(s)."
         )
 
     def _update_lane_layout(self) -> None:
