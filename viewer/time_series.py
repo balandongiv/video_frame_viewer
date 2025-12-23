@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -66,6 +67,7 @@ ANNOTATION_PALETTE = [
     "#f4511e",
 ]
 MIN_ANNOTATION_DURATION = 0.1
+ANNOTATION_NUDGE_FPS = 30.0
 
 LOGGER = logging.getLogger(__name__)
 
@@ -156,12 +158,16 @@ class TimeSeriesViewer(QWidget):
         self._annotation_drag_preview: Optional[pg.LinearRegionItem] = None
         self._last_annotation_description = ""
         self._annotation_filter_value = self.FILTER_ALL
+        self._selected_annotation: Optional[Annotation] = None
         self._ear_gain_enabled = False
         self._ear_gain_value = 1.0
+        self._ear_baseline_value = 0.0
         self._lane_widgets: List[pg.PlotWidget] = []
         self._lane_curves: dict[pg.PlotWidget, List[pg.PlotDataItem]] = {}
         self._lane_cursor_lines: dict[pg.PlotWidget, pg.InfiniteLine] = {}
         self._lane_series: dict[pg.PlotWidget, tuple[np.ndarray, np.ndarray]] = {}
+        self._lane_baselines: dict[pg.PlotWidget, pg.InfiniteLine] = {}
+        self._lane_baseline_kind: dict[pg.PlotWidget, str] = {}
         self._annotation_items_by_widget: dict[pg.PlotWidget, List[AnnotationItem]] = {}
         self._syncing_annotation_regions = False
 
@@ -219,6 +225,14 @@ class TimeSeriesViewer(QWidget):
         gain_row.addWidget(self.ear_gain_x5_button)
         gain_row.addWidget(self.ear_gain_x10_button)
         gain_row.addWidget(self.ear_gain_label)
+        gain_row.addWidget(QLabel("EAR baseline (red line):"))
+        self.ear_baseline_spinbox = QDoubleSpinBox()
+        self.ear_baseline_spinbox.setRange(-1.0e9, 1.0e9)
+        self.ear_baseline_spinbox.setDecimals(3)
+        self.ear_baseline_spinbox.setSingleStep(0.1)
+        self.ear_baseline_spinbox.setValue(self._ear_baseline_value)
+        self.ear_baseline_spinbox.valueChanged.connect(self._on_ear_baseline_changed)
+        gain_row.addWidget(self.ear_baseline_spinbox)
         gain_row.addStretch()
         control_layout.addLayout(gain_row)
         self._controls_container.setLayout(control_layout)
@@ -259,6 +273,7 @@ class TimeSeriesViewer(QWidget):
         self.annotations_dirty_label.setStyleSheet("color: #d32f2f;")
         annotation_layout.addWidget(self.save_annotations_button)
         annotation_layout.addWidget(self.annotations_dirty_label)
+        annotation_layout.addWidget(self._build_annotation_nudge_controls())
         annotation_layout.addWidget(QLabel("Shortcuts: [ or P = prev, ] or N = next"))
         annotation_layout.addStretch()
         annotation_controls.setLayout(annotation_layout)
@@ -301,6 +316,7 @@ class TimeSeriesViewer(QWidget):
         self._annotations = []
         self._set_annotations_dirty(False)
         self._update_annotation_filter_options(force_all=True)
+        self._selected_annotation = None
 
         if video_path is None:
             self.status_label.setText("Select a video to view its time series.")
@@ -373,6 +389,7 @@ class TimeSeriesViewer(QWidget):
             data,
             times,
             channel_names,
+            channel_types,
             normalized_unit,
         )
         self._sync_lane_annotations()
@@ -389,9 +406,12 @@ class TimeSeriesViewer(QWidget):
         data: np.ndarray,
         times: np.ndarray,
         channel_names: List[str],
+        channel_types: List[str],
         units: Optional[str],
     ) -> None:
-        for idx, (channel, channel_name) in enumerate(zip(data, channel_names)):
+        for idx, (channel, channel_name, channel_type) in enumerate(
+            zip(data, channel_names, channel_types)
+        ):
             widget = self._lane_widgets[idx]
             show_bottom_axis = idx == len(channel_names) - 1
             self._plot_single_lane(
@@ -399,6 +419,7 @@ class TimeSeriesViewer(QWidget):
                 channel,
                 times,
                 channel_name,
+                channel_type,
                 units,
                 show_bottom_axis=show_bottom_axis,
             )
@@ -409,6 +430,7 @@ class TimeSeriesViewer(QWidget):
         channel: np.ndarray,
         times: np.ndarray,
         channel_name: str,
+        channel_type: str,
         units: Optional[str],
         show_bottom_axis: bool,
     ) -> None:
@@ -426,6 +448,7 @@ class TimeSeriesViewer(QWidget):
         curve.setDownsampling(auto=True, method="peak")
         self._lane_curves[widget].append(curve)
         self._lane_series[widget] = (times, channel)
+        self._add_baseline(widget, channel_name, channel_type)
 
     def _normalize_channel_units(
         self,
@@ -550,6 +573,12 @@ class TimeSeriesViewer(QWidget):
         self._ear_gain_value = float(self.ear_gain_spinbox.value())
         self.ear_gain_label.setText(self._ear_gain_label_text())
         self._replot()
+
+    def _on_ear_baseline_changed(self, value: float) -> None:
+        self._ear_baseline_value = float(value)
+        for widget, baseline in self._lane_baselines.items():
+            if self._lane_baseline_kind.get(widget) == "ear":
+                baseline.setValue(self._ear_baseline_value)
 
     def _add_annotations_for_path(self, ts_path: Path) -> None:
         if self._times is None or self._times.size == 0:
@@ -729,6 +758,10 @@ class TimeSeriesViewer(QWidget):
             for curve in curves:
                 widget.removeItem(curve)
             curves.clear()
+        for widget, baseline in self._lane_baselines.items():
+            widget.removeItem(baseline)
+        self._lane_baselines.clear()
+        self._lane_baseline_kind.clear()
         self._lane_series.clear()
         if hide_cursor:
             for cursor_line in self._lane_cursor_lines.values():
@@ -743,6 +776,7 @@ class TimeSeriesViewer(QWidget):
         if self._annotation_drag_preview is not None:
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None
+        self._selected_annotation = None
 
     def _color_for_description(self, description: str) -> pg.Color:
         if description not in self._annotation_colors:
@@ -773,9 +807,13 @@ class TimeSeriesViewer(QWidget):
                 if event.button() == Qt.RightButton:
                     self._handle_annotation_context_menu(event.pos())
                     return True
-                if event.button() == Qt.LeftButton and self.annotation_mode_checkbox.isChecked():
-                    self._start_annotation_drag(event.pos())
-                    return True
+                if event.button() == Qt.LeftButton:
+                    annotation_item = self._annotation_item_at(event.pos())
+                    if annotation_item is not None and not self.annotation_mode_checkbox.isChecked():
+                        self._set_selected_annotation(annotation_item.annotation)
+                    if self.annotation_mode_checkbox.isChecked():
+                        self._start_annotation_drag(event.pos())
+                        return True
             if event.type() == QEvent.MouseMove and self._annotation_dragging:
                 self._update_annotation_drag(event.pos())
                 return True
@@ -888,6 +926,7 @@ class TimeSeriesViewer(QWidget):
         if annotation_item is None:
             return
 
+        self._set_selected_annotation(annotation_item.annotation)
         menu = QMenu(self)
         edit_action = menu.addAction("Edit label")
         delete_action = menu.addAction("Delete annotation")
@@ -942,6 +981,7 @@ class TimeSeriesViewer(QWidget):
         annotation_item.annotation.onset = onset
         annotation_item.annotation.duration = duration
         self._sync_annotation_regions(annotation_item.annotation, onset, duration, skip_region=region)
+        self._set_selected_annotation(annotation_item.annotation, announce=False)
         self._set_annotations_dirty(True)
         self.status_label.setText("Annotation updated.")
 
@@ -1102,6 +1142,8 @@ class TimeSeriesViewer(QWidget):
         self._set_annotations_dirty(True)
         self._update_annotation_filter_options()
         self.status_label.setText("Annotation deleted.")
+        if self._selected_annotation == annotation_item.annotation:
+            self._selected_annotation = None
 
     def _start_annotation_drag(self, pos) -> None:
         time_value = self._time_at_position(pos)
@@ -1166,6 +1208,7 @@ class TimeSeriesViewer(QWidget):
             annotation = Annotation(onset=onset, duration=duration, description=description)
             self._annotations.append(annotation)
             self._render_annotation(annotation)
+            self._set_selected_annotation(annotation, announce=False)
             self._set_annotations_dirty(True)
             self._update_annotation_filter_options()
             self.status_label.setText("Annotation added.")
@@ -1370,6 +1413,76 @@ class TimeSeriesViewer(QWidget):
             widget.setParent(None)
             widget.deleteLater()
         self._update_lane_layout()
+
+    def _add_baseline(self, widget: pg.PlotWidget, channel_name: str, channel_type: str) -> None:
+        baseline_value: Optional[float] = None
+        baseline_kind = None
+        if channel_type in {"eeg", "eog"}:
+            baseline_value = 0.0
+            baseline_kind = "zero"
+        elif channel_name.upper().startswith("EAR-"):
+            baseline_value = self._ear_baseline_value
+            baseline_kind = "ear"
+
+        if baseline_value is None or baseline_kind is None:
+            return
+
+        baseline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("red", width=1))
+        baseline.setValue(baseline_value)
+        widget.addItem(baseline)
+        self._lane_baselines[widget] = baseline
+        self._lane_baseline_kind[widget] = baseline_kind
+
+    def _build_annotation_nudge_controls(self) -> QWidget:
+        nudge_container = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Annotation Nudge"))
+        layout.addWidget(QLabel("Step (frames):"))
+        self.annotation_nudge_spinbox = QSpinBox()
+        self.annotation_nudge_spinbox.setRange(1, 1000000)
+        self.annotation_nudge_spinbox.setValue(1)
+        self.annotation_nudge_spinbox.setSingleStep(1)
+        layout.addWidget(self.annotation_nudge_spinbox)
+        self.nudge_back_button = QPushButton("− Nudge")
+        self.nudge_back_button.clicked.connect(lambda: self._nudge_selected_annotation(-1))
+        self.nudge_forward_button = QPushButton("+ Nudge")
+        self.nudge_forward_button.clicked.connect(lambda: self._nudge_selected_annotation(1))
+        layout.addWidget(self.nudge_back_button)
+        layout.addWidget(self.nudge_forward_button)
+        nudge_container.setLayout(layout)
+        return nudge_container
+
+    def _set_selected_annotation(self, annotation: Annotation, announce: bool = True) -> None:
+        self._selected_annotation = annotation
+        if announce:
+            self.status_label.setText(
+                f"Selected annotation '{annotation.description}' at {annotation.onset:.2f}s."
+            )
+
+    def _nudge_selected_annotation(self, direction: int) -> None:
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation to nudge.")
+            return
+        if direction == 0:
+            return
+        step_frames = self.annotation_nudge_spinbox.value()
+        delta_seconds = (step_frames / ANNOTATION_NUDGE_FPS) * (1 if direction > 0 else -1)
+        annotation = self._selected_annotation
+        duration = annotation.duration
+        new_onset = annotation.onset + delta_seconds
+        if self._times is not None and self._times.size > 0:
+            data_end = float(self._times[-1])
+            max_onset = max(0.0, data_end - duration)
+            new_onset = max(0.0, min(new_onset, max_onset))
+        else:
+            new_onset = max(0.0, new_onset)
+        annotation.onset = new_onset
+        self._sync_annotation_regions(annotation, new_onset, duration)
+        self._set_annotations_dirty(True)
+        self.status_label.setText(
+            f"Nudged annotation '{annotation.description}' to {annotation.onset:.2f}s."
+        )
 
     def _update_lane_layout(self) -> None:
         for idx, widget in enumerate(self._lane_widgets):
