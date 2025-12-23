@@ -262,9 +262,6 @@ class TimeSeriesViewer(QWidget):
         left_controls = QWidget()
         left_layout = QHBoxLayout()
         left_layout.setContentsMargins(0, 0, 0, 0)
-        self.annotation_mode_checkbox = QCheckBox("Annotation mode (drag to add)")
-        self.annotation_mode_checkbox.stateChanged.connect(self._on_annotation_mode_changed)
-        left_layout.addWidget(self.annotation_mode_checkbox)
         left_layout.addWidget(QLabel("Annotations:"))
         self.annotation_filter_combo = QComboBox()
         self.annotation_filter_combo.currentIndexChanged.connect(self._on_annotation_filter_changed)
@@ -832,12 +829,12 @@ class TimeSeriesViewer(QWidget):
                     self._handle_annotation_context_menu(event.pos())
                     return True
                 if event.button() == Qt.LeftButton:
-                    annotation_item = self._annotation_item_at(event.pos())
-                    if annotation_item is not None and not self.annotation_mode_checkbox.isChecked():
-                        self._set_selected_annotation(annotation_item.annotation)
-                    if self.annotation_mode_checkbox.isChecked():
+                    if event.modifiers() & Qt.ControlModifier:
                         self._start_annotation_drag(event.pos())
                         return True
+                    annotation_item = self._annotation_item_at(event.pos())
+                    if annotation_item is not None:
+                        self._set_selected_annotation(annotation_item.annotation)
             if event.type() == QEvent.MouseMove and self._annotation_dragging:
                 self._update_annotation_drag(event.pos())
                 return True
@@ -1304,12 +1301,6 @@ class TimeSeriesViewer(QWidget):
         if self._annotation_drag_preview is not None:
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None
-
-    def _on_annotation_mode_changed(self, state: int) -> None:
-        if state == Qt.Checked:
-            self.plot_widget.setCursor(Qt.CrossCursor)
-        else:
-            self.plot_widget.setCursor(Qt.ArrowCursor)
 
     def jump_to_next_annotation(self) -> None:
         """Jump the view to the next annotation onset."""
