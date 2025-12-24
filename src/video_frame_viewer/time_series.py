@@ -1365,25 +1365,33 @@ class TimeSeriesViewer(QWidget):
 
     def _annotation_minimum_time(
         self, annotation: Annotation
-    ) -> tuple[Optional[float], Optional[str]]:
+    ) -> tuple[Optional[float], Optional[float], Optional[str]]:
         if self.raw is None or self._times is None or self._times.size == 0:
-            return None, "EAR-avg_ear not available; jumped to annotation start."
+            return None, None, "EAR-avg_ear not available; jumped to annotation start."
 
         try:
             channel_index = self.raw.ch_names.index(EAR_AVG_CHANNEL)
         except ValueError:
-            return None, "EAR-avg_ear not available; jumped to annotation start."
+            return None, None, "EAR-avg_ear not available; jumped to annotation start."
 
         data_end = float(self._times[-1])
         start = max(0.0, annotation.onset)
         end = min(annotation.onset + annotation.duration, data_end)
         if end <= start:
-            return None, "No EAR-avg_ear samples in annotation; jumped to annotation start."
+            return (
+                None,
+                None,
+                "No EAR-avg_ear samples in annotation; jumped to annotation start.",
+            )
 
         start_sample = int(np.searchsorted(self._times, start, side="left"))
         end_sample = int(np.searchsorted(self._times, end, side="right"))
         if end_sample <= start_sample:
-            return None, "No EAR-avg_ear samples in annotation; jumped to annotation start."
+            return (
+                None,
+                None,
+                "No EAR-avg_ear samples in annotation; jumped to annotation start.",
+            )
 
         data = self.raw.get_data(
             picks=[channel_index], start=start_sample, stop=end_sample, verbose="ERROR"
@@ -1391,14 +1399,32 @@ class TimeSeriesViewer(QWidget):
         times = self.raw.times[start_sample:end_sample]
         finite_mask = np.isfinite(data) & np.isfinite(times)
         if not np.any(finite_mask):
-            return None, "No EAR-avg_ear samples in annotation; jumped to annotation start."
+            return (
+                None,
+                None,
+                "No EAR-avg_ear samples in annotation; jumped to annotation start.",
+            )
 
         data = data[finite_mask]
         times = times[finite_mask]
-        min_value = np.min(data)
-        min_indices = np.where(data == min_value)[0]
-        min_index = int(min_indices[0])
-        return float(times[min_index]), None
+        min_index = int(np.argmin(data))
+        min_time = float(times[min_index])
+        min_value = float(data[min_index])
+
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            samples = ", ".join(
+                f"{timestamp:.6f}s:{value:.6f}" for timestamp, value in zip(times, data)
+            )
+            LOGGER.debug(
+                "EAR-avg_ear samples in annotation [%.6f, %.6f]: %s; selected min %.6f at %.6f",
+                start,
+                end,
+                samples,
+                min_value,
+                min_time,
+            )
+
+        return min_time, min_value, None
 
     def jump_to_next_annotation(self) -> None:
         """Jump the view to the next annotation onset."""
@@ -1428,7 +1454,7 @@ class TimeSeriesViewer(QWidget):
         if target is None:
             return
 
-        min_time, message = self._annotation_minimum_time(target)
+        min_time, min_value, message = self._annotation_minimum_time(target)
         if min_time is None:
             self._ensure_view_range(target.onset)
             self.annotation_jump_requested.emit(target.onset)
@@ -1441,7 +1467,8 @@ class TimeSeriesViewer(QWidget):
         self._ensure_view_range(min_time)
         self.annotation_jump_requested.emit(min_time)
         self.status_label.setText(
-            f"Jumped to EAR-avg_ear minimum at {min_time:.2f}s in '{target.description}'."
+            "Jumped to EAR-avg_ear minimum "
+            f"{min_value:.6f} at {min_time:.2f}s in '{target.description}'."
         )
 
     def _on_annotation_filter_changed(self) -> None:
