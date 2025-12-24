@@ -21,11 +21,6 @@ class RecordingLocator:
 
     def preferred_path(self, root: Path, filename: str) -> Path:
         candidate = self.candidate_dir(root) / filename
-        fallback = self.fallback_dir(root) / filename
-        if candidate.exists():
-            return candidate
-        if fallback.exists():
-            return fallback
         return candidate
 
 
@@ -53,10 +48,6 @@ def _infer_recording_locator(video_path: Path) -> RecordingLocator:
     if prefix_index != -1:
         base_identifier = stem[prefix_index + len(prefix) :]
 
-    parts = base_identifier.split("_")
-    if parts and parts[-1].isdigit() and len(parts[-1]) <= 2:
-        base_identifier = "_".join(parts[:-1]) or base_identifier
-
     return RecordingLocator(subject_folder=subject_folder, base_identifier=base_identifier)
 
 
@@ -80,9 +71,4 @@ def derive_annotation_path(
         return ts_path.with_suffix(".csv")
 
     csv_candidate = locator.candidate_dir(base_root) / "ear_eog.csv"
-    csv_fallback = locator.fallback_dir(base_root) / "ear_eog.csv"
-    if csv_candidate.exists():
-        return csv_candidate
-    if csv_fallback.exists():
-        return csv_fallback
     return csv_candidate

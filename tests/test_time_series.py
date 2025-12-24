@@ -19,10 +19,20 @@ class DeriveTimeSeriesPathTests(unittest.TestCase):
             expected,
         )
 
-    def test_suffix_stripping(self) -> None:
+    def test_keeps_segment_suffix_in_folder_name(self) -> None:
         video = Path(r"D:\dataset\drowsy_driving_raja\S2\MD.mff.S02_20170519_043933_2.mov")
         expected = (
-            self.config.time_series_root / "S2" / "S02_20170519_043933" / "ear_eog.fif"
+            self.config.time_series_root / "S2" / "S02_20170519_043933_2" / "ear_eog.fif"
+        )
+        self.assertEqual(
+            derive_time_series_path(video, processed_root=self.config.time_series_root),
+            expected,
+        )
+
+    def test_keeps_higher_segment_suffix_in_folder_name(self) -> None:
+        video = Path(r"D:\dataset\drowsy_driving_raja\S11\MD.mff\S24_20181227_034657_3.mov")
+        expected = (
+            self.config.time_series_root / "S11" / "S24_20181227_034657_3" / "ear_eog.fif"
         )
         self.assertEqual(
             derive_time_series_path(video, processed_root=self.config.time_series_root),
@@ -53,6 +63,18 @@ class DeriveTimeSeriesPathTests(unittest.TestCase):
             csv_root=config.annotation_root,
         )
         expected = config.annotation_root / "S1" / "S01_20170519_043933" / "ear_eog.csv"
+        self.assertEqual(annotation_path, expected)
+
+    def test_annotation_path_keeps_segment_suffix(self) -> None:
+        video = Path(r"D:\dataset\drowsy_driving_raja\S1\MD.mff\S01_20170519_043933_2.mov")
+        annotation_path = derive_annotation_path(
+            video,
+            processed_root=self.config.time_series_root,
+            csv_root=self.config.annotation_root,
+        )
+        expected = (
+            self.config.annotation_root / "S1" / "S01_20170519_043933_2" / "ear_eog.csv"
+        )
         self.assertEqual(annotation_path, expected)
 
 
