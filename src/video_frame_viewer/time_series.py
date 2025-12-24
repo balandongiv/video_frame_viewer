@@ -140,6 +140,8 @@ class TimeSeriesViewer(QWidget):
         self._lane_baseline_kind: dict[pg.PlotWidget, str] = {}
         self._annotation_items_by_widget: dict[pg.PlotWidget, List[AnnotationItem]] = {}
         self._syncing_annotation_regions = False
+        self._annotation_sample_scatter: Optional[pg.ScatterPlotItem] = None
+        self._annotation_min_marker: Optional[pg.ScatterPlotItem] = None
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -260,7 +262,9 @@ class TimeSeriesViewer(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addStretch()
         right_layout.addWidget(self._build_annotation_nudge_group())
-        right_layout.addWidget(QLabel("Shortcuts: [ or P = prev, ] or N = next"))
+        right_layout.addWidget(
+            QLabel("Shortcuts: [ or P = prev, ] or N = next, Ctrl+N = next (EAR min)")
+        )
         right_controls.setLayout(right_layout)
 
         annotation_layout.addWidget(left_controls, 1)
@@ -385,11 +389,6 @@ class TimeSeriesViewer(QWidget):
         if times is None:
             return
 
-        decimation = max(1, data.shape[1] // self.max_points)
-        if decimation > 1:
-            data = data[:, ::decimation]
-            times = times[::decimation]
-
         channel_names = [self.raw.ch_names[index] for index in picks]
         channel_types = self.raw.get_channel_types(picks=picks)
         data, picks, channel_names, channel_types = self._order_channels_for_display(
@@ -461,9 +460,29 @@ class TimeSeriesViewer(QWidget):
             widget.setLabel("left", channel_name, units=units)
         else:
             widget.setLabel("left", channel_name)
-        curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
-        curve.setDownsampling(auto=True, method="peak")
-        self._lane_curves[widget].append(curve)
+        curves_to_add: List[pg.GraphicsObject] = []
+        if channel_name == EAR_AVG_CHANNEL:
+            pen = self._pen_for_channel(channel_name, 0)
+            scatter = pg.ScatterPlotItem(
+                times,
+                channel,
+                pen=pen,
+                brush=pg.mkBrush(pen.color()),
+                size=6,
+                symbol="o",
+            )
+            base_color = pen.color()
+            line_color = pg.mkColor(base_color)
+            line_color.setAlphaF(0.3)
+            line_pen = pg.mkPen(line_color, width=1)
+            line_curve = widget.plot(times, channel, pen=line_pen)
+            widget.addItem(scatter)
+            curves_to_add.extend([line_curve, scatter])
+        else:
+            curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
+            curve.setDownsampling(auto=True, method="peak")
+            curves_to_add.append(curve)
+        self._lane_curves[widget].extend(curves_to_add)
         self._lane_series[widget] = (times, channel)
         self._add_baseline(widget, channel_name, channel_type)
 
@@ -785,6 +804,7 @@ class TimeSeriesViewer(QWidget):
         self._lane_baselines.clear()
         self._lane_baseline_kind.clear()
         self._lane_series.clear()
+        self._clear_annotation_samples()
         if hide_cursor:
             for cursor_line in self._lane_cursor_lines.values():
                 cursor_line.hide()
@@ -1328,25 +1348,15 @@ class TimeSeriesViewer(QWidget):
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None
 
-    def jump_to_next_annotation(self) -> None:
-        """Jump the view to the next annotation onset."""
-
-        self._jump_to_annotation(direction="next")
-
-    def jump_to_previous_annotation(self) -> None:
-        """Jump the view to the previous annotation onset."""
-
-        self._jump_to_annotation(direction="previous")
-
-    def _jump_to_annotation(self, direction: str) -> None:
+    def _target_annotation(self, direction: str) -> Optional[Annotation]:
         if self._times is None or not self._annotations:
             self.status_label.setText("No annotations available.")
-            return
+            return None
 
         annotations = self._filtered_annotations()
         if not annotations:
             self.status_label.setText("No annotations match the current filter.")
-            return
+            return None
 
         current_position = self._last_cursor_time
         if direction == "next":
@@ -1367,6 +1377,98 @@ class TimeSeriesViewer(QWidget):
         if target is None:
             label = "next" if direction == "next" else "previous"
             self.status_label.setText(f"No {label} annotation.")
+            return None
+
+        return target
+
+    def _annotation_minimum_time(
+        self, annotation: Annotation
+    ) -> tuple[
+        Optional[float],
+        Optional[float],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[str],
+    ]:
+        if self.raw is None or self._times is None or self._times.size == 0:
+            return None, None, None, None, "EAR-avg_ear not available; jumped to annotation start."
+
+        try:
+            channel_index = self.raw.ch_names.index(EAR_AVG_CHANNEL)
+        except ValueError:
+            return None, None, None, None, "EAR-avg_ear not available; jumped to annotation start."
+
+        data_end = float(self._times[-1])
+        start = max(0.0, annotation.onset)
+        end = min(annotation.onset + annotation.duration, data_end)
+        if end <= start:
+            return (
+                None,
+                None,
+                None,
+                None,
+                "No EAR-avg_ear samples in annotation; jumped to annotation start.",
+            )
+
+        start_sample = int(np.searchsorted(self._times, start, side="left"))
+        end_sample = int(np.searchsorted(self._times, end, side="right"))
+        if end_sample <= start_sample:
+            return (
+                None,
+                None,
+                None,
+                None,
+                "No EAR-avg_ear samples in annotation; jumped to annotation start.",
+            )
+
+        data = self.raw.get_data(
+            picks=[channel_index], start=start_sample, stop=end_sample, verbose="ERROR"
+        )[0]
+        times = self.raw.times[start_sample:end_sample]
+        finite_mask = np.isfinite(data) & np.isfinite(times)
+        if not np.any(finite_mask):
+            return (
+                None,
+                None,
+                None,
+                None,
+                "No EAR-avg_ear samples in annotation; jumped to annotation start.",
+            )
+
+        data = data[finite_mask]
+        times = times[finite_mask]
+        min_index = int(np.argmin(data))
+        min_time = float(times[min_index])
+        min_value = float(data[min_index])
+
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            samples = ", ".join(
+                f"{timestamp:.6f}s:{value:.6f}" for timestamp, value in zip(times, data)
+            )
+            LOGGER.debug(
+                "EAR-avg_ear samples in annotation [%.6f, %.6f]: %s; selected min %.6f at %.6f",
+                start,
+                end,
+                samples,
+                min_value,
+                min_time,
+            )
+
+        return min_time, min_value, times, data, None
+
+    def jump_to_next_annotation(self) -> None:
+        """Jump the view to the next annotation onset."""
+
+        self._jump_to_annotation(direction="next")
+
+    def jump_to_previous_annotation(self) -> None:
+        """Jump the view to the previous annotation onset."""
+
+        self._jump_to_annotation(direction="previous")
+
+    def _jump_to_annotation(self, direction: str) -> None:
+        target = self._target_annotation(direction)
+        if target is None:
             return
 
         self._ensure_view_range(target.onset)
@@ -1374,6 +1476,80 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText(
             f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
         )
+
+    def jump_to_next_annotation_minimum(self) -> None:
+        """Jump to the next annotation and center on the EAR-avg_ear minimum."""
+
+        target = self._target_annotation(direction="next")
+        if target is None:
+            return
+
+        min_time, min_value, times, data, message = self._annotation_minimum_time(target)
+        if min_time is None:
+            self._clear_annotation_samples()
+            self._ensure_view_range(target.onset)
+            self.annotation_jump_requested.emit(target.onset)
+            fallback = message or (
+                f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
+            )
+            self.status_label.setText(fallback)
+            return
+
+        self._ensure_view_range(min_time)
+        self.annotation_jump_requested.emit(min_time)
+        self._show_annotation_samples(times, data, min_time, min_value)
+        self.status_label.setText(
+            "Jumped to EAR-avg_ear minimum "
+            f"{min_value:.6f} at {min_time:.2f}s in '{target.description}'."
+        )
+
+    def _show_annotation_samples(
+        self,
+        times: Optional[np.ndarray],
+        data: Optional[np.ndarray],
+        min_time: Optional[float],
+        min_value: Optional[float],
+    ) -> None:
+        self._clear_annotation_samples()
+        if (
+            times is None
+            or data is None
+            or times.size == 0
+            or data.size == 0
+            or min_time is None
+            or min_value is None
+        ):
+            return
+
+        scatter = pg.ScatterPlotItem(
+            times,
+            data,
+            pen=pg.mkPen("#283593"),
+            brush=pg.mkBrush("#5c6bc0"),
+            size=8,
+            symbol="o",
+        )
+        scatter.setZValue(60)
+        min_marker = pg.ScatterPlotItem(
+            [min_time],
+            [min_value],
+            pen=pg.mkPen("#b71c1c", width=2),
+            brush=pg.mkBrush("#e53935"),
+            size=12,
+            symbol="x",
+        )
+        min_marker.setZValue(70)
+        self.plot_widget.addItem(scatter)
+        self.plot_widget.addItem(min_marker)
+        self._annotation_sample_scatter = scatter
+        self._annotation_min_marker = min_marker
+
+    def _clear_annotation_samples(self) -> None:
+        for item in (self._annotation_sample_scatter, self._annotation_min_marker):
+            if item is not None:
+                self.plot_widget.removeItem(item)
+        self._annotation_sample_scatter = None
+        self._annotation_min_marker = None
 
     def _on_annotation_filter_changed(self) -> None:
         data = self.annotation_filter_combo.currentData()
