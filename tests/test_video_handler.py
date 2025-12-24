@@ -6,7 +6,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from video_frame_viewer.video_handler import VideoHandler
 
 

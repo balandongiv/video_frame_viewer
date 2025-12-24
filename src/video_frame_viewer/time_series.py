@@ -260,7 +260,9 @@ class TimeSeriesViewer(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addStretch()
         right_layout.addWidget(self._build_annotation_nudge_group())
-        right_layout.addWidget(QLabel("Shortcuts: [ or P = prev, ] or N = next"))
+        right_layout.addWidget(
+            QLabel("Shortcuts: [ or P = prev, ] or N = next, Ctrl+N = next (EAR min)")
+        )
         right_controls.setLayout(right_layout)
 
         annotation_layout.addWidget(left_controls, 1)
@@ -1328,25 +1330,15 @@ class TimeSeriesViewer(QWidget):
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None
 
-    def jump_to_next_annotation(self) -> None:
-        """Jump the view to the next annotation onset."""
-
-        self._jump_to_annotation(direction="next")
-
-    def jump_to_previous_annotation(self) -> None:
-        """Jump the view to the previous annotation onset."""
-
-        self._jump_to_annotation(direction="previous")
-
-    def _jump_to_annotation(self, direction: str) -> None:
+    def _target_annotation(self, direction: str) -> Optional[Annotation]:
         if self._times is None or not self._annotations:
             self.status_label.setText("No annotations available.")
-            return
+            return None
 
         annotations = self._filtered_annotations()
         if not annotations:
             self.status_label.setText("No annotations match the current filter.")
-            return
+            return None
 
         current_position = self._last_cursor_time
         if direction == "next":
@@ -1367,12 +1359,89 @@ class TimeSeriesViewer(QWidget):
         if target is None:
             label = "next" if direction == "next" else "previous"
             self.status_label.setText(f"No {label} annotation.")
+            return None
+
+        return target
+
+    def _annotation_minimum_time(
+        self, annotation: Annotation
+    ) -> tuple[Optional[float], Optional[str]]:
+        if self.raw is None or self._times is None or self._times.size == 0:
+            return None, "EAR-avg_ear not available; jumped to annotation start."
+
+        try:
+            channel_index = self.raw.ch_names.index(EAR_AVG_CHANNEL)
+        except ValueError:
+            return None, "EAR-avg_ear not available; jumped to annotation start."
+
+        data_end = float(self._times[-1])
+        start = max(0.0, annotation.onset)
+        end = min(annotation.onset + annotation.duration, data_end)
+        if end <= start:
+            return None, "No EAR-avg_ear samples in annotation; jumped to annotation start."
+
+        start_sample = int(np.searchsorted(self._times, start, side="left"))
+        end_sample = int(np.searchsorted(self._times, end, side="right"))
+        if end_sample <= start_sample:
+            return None, "No EAR-avg_ear samples in annotation; jumped to annotation start."
+
+        data = self.raw.get_data(
+            picks=[channel_index], start=start_sample, stop=end_sample, verbose="ERROR"
+        )[0]
+        times = self.raw.times[start_sample:end_sample]
+        finite_mask = np.isfinite(data) & np.isfinite(times)
+        if not np.any(finite_mask):
+            return None, "No EAR-avg_ear samples in annotation; jumped to annotation start."
+
+        data = data[finite_mask]
+        times = times[finite_mask]
+        min_value = np.min(data)
+        min_indices = np.where(data == min_value)[0]
+        min_index = int(min_indices[0])
+        return float(times[min_index]), None
+
+    def jump_to_next_annotation(self) -> None:
+        """Jump the view to the next annotation onset."""
+
+        self._jump_to_annotation(direction="next")
+
+    def jump_to_previous_annotation(self) -> None:
+        """Jump the view to the previous annotation onset."""
+
+        self._jump_to_annotation(direction="previous")
+
+    def _jump_to_annotation(self, direction: str) -> None:
+        target = self._target_annotation(direction)
+        if target is None:
             return
 
         self._ensure_view_range(target.onset)
         self.annotation_jump_requested.emit(target.onset)
         self.status_label.setText(
             f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
+        )
+
+    def jump_to_next_annotation_minimum(self) -> None:
+        """Jump to the next annotation and center on the EAR-avg_ear minimum."""
+
+        target = self._target_annotation(direction="next")
+        if target is None:
+            return
+
+        min_time, message = self._annotation_minimum_time(target)
+        if min_time is None:
+            self._ensure_view_range(target.onset)
+            self.annotation_jump_requested.emit(target.onset)
+            fallback = message or (
+                f"Jumped to annotation '{target.description}' at {target.onset:.2f}s."
+            )
+            self.status_label.setText(fallback)
+            return
+
+        self._ensure_view_range(min_time)
+        self.annotation_jump_requested.emit(min_time)
+        self.status_label.setText(
+            f"Jumped to EAR-avg_ear minimum at {min_time:.2f}s in '{target.description}'."
         )
 
     def _on_annotation_filter_changed(self) -> None:

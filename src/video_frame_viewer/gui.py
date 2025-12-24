@@ -893,6 +893,12 @@ class VideoFrameViewer(QMainWindow):
         next_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         next_annotation_letter.activated.connect(self._handle_next_annotation_shortcut)
 
+        next_annotation_min_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_N), self)
+        next_annotation_min_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        next_annotation_min_shortcut.activated.connect(
+            self._handle_next_annotation_min_shortcut
+        )
+
         previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_P), self)
         previous_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         previous_annotation_letter.activated.connect(self._handle_previous_annotation_shortcut)
@@ -908,6 +914,7 @@ class VideoFrameViewer(QMainWindow):
         self.next_annotation_shortcut = next_annotation_shortcut
         self.previous_annotation_shortcut = previous_annotation_shortcut
         self.next_annotation_letter = next_annotation_letter
+        self.next_annotation_min_shortcut = next_annotation_min_shortcut
         self.previous_annotation_letter = previous_annotation_letter
         self.save_annotations_shortcut = save_annotations_shortcut
 
@@ -922,6 +929,10 @@ class VideoFrameViewer(QMainWindow):
     def _handle_next_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.jump_to_next_annotation()
+
+    def _handle_next_annotation_min_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.jump_to_next_annotation_minimum()
 
     def _handle_previous_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
