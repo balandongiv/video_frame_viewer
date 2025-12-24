@@ -1,9 +1,9 @@
 """Tests for viewer utility helpers."""
 import tempfile
-from pathlib import Path
 import unittest
+from pathlib import Path
 
-from viewer.utils import find_md_mff_videos, is_md_mff_video, seconds_to_frame_index
+from video_frame_viewer.utils import find_md_mff_videos, is_md_mff_video, seconds_to_frame_index
 
 
 class SecondsToFrameIndexTests(unittest.TestCase):

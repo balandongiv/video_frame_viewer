@@ -1,0 +1,6 @@
+# Default configuration for running from a repository checkout.
+dataset_root: ./test_data/drowsy_driving_raja
+csv_dir: ../drowsy_driving_raja_processed
+fif_dir: ../drowsy_driving_raja_processed
+ui:
+  ear_baseline: 0.0

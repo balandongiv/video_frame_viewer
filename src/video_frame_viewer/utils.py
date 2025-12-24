@@ -1,17 +1,24 @@
 """Utility helpers for the video viewer application."""
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import cv2
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QImage, QPixmap
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checking only
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QPixmap
 
 
 def frame_to_pixmap(frame, target_size: Optional[QSize] = None) -> Optional[QPixmap]:
     """Convert a BGR OpenCV frame to a QPixmap, optionally scaled."""
     if frame is None:
         return None
+
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QImage, QPixmap
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     height, width, channels = rgb_frame.shape
@@ -31,6 +38,9 @@ def frame_to_pixmap(frame, target_size: Optional[QSize] = None) -> Optional[QPix
 
 def placeholder_pixmap(target_size: QSize) -> QPixmap:
     """Create a simple placeholder pixmap with a neutral background."""
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QPixmap
+
     pixmap = QPixmap(target_size)
     pixmap.fill(Qt.lightGray)
     return pixmap

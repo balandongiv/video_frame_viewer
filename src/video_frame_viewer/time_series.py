@@ -7,16 +7,16 @@ import math
 import os
 import shutil
 import tempfile
-from datetime import datetime
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Set
 
 import mne
 import numpy as np
 import pyqtgraph as pg
 from mne.io.constants import FIFF
-from PyQt5.QtCore import QEvent, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,7 +36,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-PROCESSED_ROOT = Path(r"D:\dataset\drowsy_driving_raja_processed")
+from video_frame_viewer.paths import derive_annotation_path, derive_time_series_path
+
 PRIMARY_CHANNEL = "EEG-E8"
 EAR_AVG_CHANNEL = "EAR-avg_ear"
 DEFAULT_VISIBLE_CHANNELS = {PRIMARY_CHANNEL, EAR_AVG_CHANNEL}
@@ -85,51 +86,6 @@ class AnnotationItem:
     region: pg.LinearRegionItem
 
 
-def derive_time_series_path(video_path: Path, processed_root: Path = PROCESSED_ROOT) -> Path:
-    """Return the expected time series path for a given video file.
-
-    The path is built by matching the subject folder from anywhere in the video
-    path and using the base recording identifier (portion after ``MD.mff.``
-    without any trailing numeric suffix) to locate ``ear_eog.fif`` in the
-    processed dataset root.
-    """
-
-    raw_path = str(video_path)
-    normalized = Path(raw_path.replace("\\", "/"))
-
-    parts = normalized.parts
-    if len(parts) == 1 and "\\" in raw_path:
-        parts = PureWindowsPath(raw_path).parts
-
-    subject_folder = next(
-        (part for part in reversed(parts) if part.upper().startswith("S") and part[1:].isdigit()),
-        None,
-    )
-    if subject_folder is None:
-        raise ValueError(f"Could not determine subject folder from {video_path}")
-
-    stem = normalized.stem
-    lower_stem = stem.lower()
-    prefix = "md.mff."
-
-    base_identifier = stem
-    prefix_index = lower_stem.find(prefix)
-    if prefix_index != -1:
-        base_identifier = stem[prefix_index + len(prefix) :]
-
-    parts = base_identifier.split("_")
-    if parts and parts[-1].isdigit() and len(parts[-1]) <= 2:
-        base_identifier = "_".join(parts[:-1]) or base_identifier
-
-    candidate = processed_root / subject_folder / base_identifier / "ear_eog.fif"
-    fallback = processed_root / subject_folder / "ear_eog.fif"
-
-    if not candidate.exists() and fallback.exists():
-        return fallback
-
-    return candidate
-
-
 class TimeSeriesViewer(QWidget):
     """Widget that renders time series data alongside the video frames."""
 
@@ -137,7 +93,14 @@ class TimeSeriesViewer(QWidget):
     FILTER_ALL = "__all__"
     FILTER_NONE = "__none__"
 
-    def __init__(self, max_points: int = 10000, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        max_points: int = 10000,
+        parent: Optional[QWidget] = None,
+        time_series_root: Optional[Path] = None,
+        annotation_root: Optional[Path] = None,
+        ui_settings: Optional[dict[str, float]] = None,
+    ) -> None:
         super().__init__(parent)
         self.max_points = max_points
         self.raw: Optional[mne.io.BaseRaw] = None
@@ -148,7 +111,12 @@ class TimeSeriesViewer(QWidget):
         self.view_span_seconds: float = self.default_view_span_seconds
         self.min_span_seconds: float = 0.1
         self._last_ts_path: Optional[Path] = None
-        self.processed_root: Path = PROCESSED_ROOT
+        self._last_video_path: Optional[Path] = None
+        self._last_annotation_path: Optional[Path] = None
+        self._expected_ts_path: Optional[Path] = None
+        self._expected_annotation_path: Optional[Path] = None
+        self.time_series_root: Path = time_series_root or Path.cwd()
+        self.annotation_root: Path = annotation_root or self.time_series_root
         self._annotation_by_region: dict[pg.LinearRegionItem, AnnotationItem] = {}
         self._annotation_colors: dict[str, pg.Color] = {}
         self._annotations: List[Annotation] = []
@@ -161,7 +129,9 @@ class TimeSeriesViewer(QWidget):
         self._selected_annotation: Optional[Annotation] = None
         self._ear_gain_enabled = False
         self._ear_gain_value = 1.0
-        self._ear_baseline_value = 0.0
+        self._ear_baseline_value = (
+            float(ui_settings.get("ear_baseline", 0.0)) if ui_settings else 0.0
+        )
         self._lane_widgets: List[pg.PlotWidget] = []
         self._lane_curves: dict[pg.PlotWidget, List[pg.PlotDataItem]] = {}
         self._lane_cursor_lines: dict[pg.PlotWidget, pg.InfiniteLine] = {}
@@ -320,7 +290,22 @@ class TimeSeriesViewer(QWidget):
     def set_processed_root(self, processed_root: Path) -> None:
         """Override the processed dataset root for time series data."""
 
-        self.processed_root = processed_root
+        self.time_series_root = processed_root
+
+    def set_annotation_root(self, annotation_root: Path) -> None:
+        """Override the root used for annotation CSV files."""
+
+        self.annotation_root = annotation_root
+
+    def expected_paths(self) -> tuple[Optional[Path], Optional[Path]]:
+        """Return the expected FIF and CSV paths for the last video selection."""
+
+        return self._expected_ts_path, self._expected_annotation_path
+
+    def last_loaded_paths(self) -> tuple[Optional[Path], Optional[Path]]:
+        """Return the last successfully loaded FIF and CSV paths."""
+
+        return self._last_ts_path, self._last_annotation_path
 
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""
@@ -333,6 +318,10 @@ class TimeSeriesViewer(QWidget):
         self.channel_list.clear()
         self._reset_zoom()
         self._last_ts_path = None
+        self._last_video_path = None
+        self._last_annotation_path = None
+        self._expected_ts_path = None
+        self._expected_annotation_path = None
         self._annotations = []
         self._set_annotations_dirty(False)
         self._update_annotation_filter_options(force_all=True)
@@ -344,25 +333,33 @@ class TimeSeriesViewer(QWidget):
             return
 
         try:
-            ts_path = derive_time_series_path(video_path, processed_root=self.processed_root)
+            ts_path = derive_time_series_path(video_path, processed_root=self.time_series_root)
+            self._expected_ts_path = ts_path
         except ValueError as exc:  # pragma: no cover - guardrails for unexpected paths
             self.status_label.setText(str(exc))
             self.cursor_line.hide()
             return
+        csv_path = derive_annotation_path(
+            video_path, processed_root=self.time_series_root, csv_root=self.annotation_root
+        )
+        self._expected_annotation_path = csv_path
         if not ts_path.exists():
             self.status_label.setText(
-                f"Time series file not found at {ts_path}."
+                f"Time series file not found at {ts_path}. "
+                "Update your configuration or verify the dataset root."
             )
             self.cursor_line.hide()
             return
 
         self.status_label.setText(f"Loaded time series from {ts_path}.")
         self._last_ts_path = ts_path
+        self._last_video_path = video_path
+        self._last_annotation_path = csv_path
         self.raw = mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
         self._times = self.raw.times
         self._populate_channel_list()
         self._plot_data()
-        self._add_annotations_for_path(ts_path)
+        self._add_annotations_for_path(csv_path)
         self._ensure_view_range(0.0)
 
     def update_cursor_time(self, seconds: float) -> None:
@@ -601,11 +598,11 @@ class TimeSeriesViewer(QWidget):
             if self._lane_baseline_kind.get(widget) == "ear":
                 baseline.setValue(self._ear_baseline_value)
 
-    def _add_annotations_for_path(self, ts_path: Path) -> None:
+    def _add_annotations_for_path(self, csv_path: Path) -> None:
         if self._times is None or self._times.size == 0:
             return
 
-        annotations = self._load_annotations(ts_path)
+        annotations = self._load_annotations(csv_path)
         if not annotations:
             return
 
@@ -615,8 +612,7 @@ class TimeSeriesViewer(QWidget):
         self._update_annotation_filter_options()
         self._set_annotations_dirty(False)
 
-    def _load_annotations(self, ts_path: Path) -> List[Annotation]:
-        csv_path = ts_path.with_suffix(".csv")
+    def _load_annotations(self, csv_path: Path) -> List[Annotation]:
         if not csv_path.exists():
             LOGGER.info("No annotation CSV found at %s", csv_path)
             return []
@@ -693,7 +689,11 @@ class TimeSeriesViewer(QWidget):
         if self.show_all_checkbox.isChecked() or not self._selected_channels:
             return list(range(len(self.raw.ch_names)))
 
-        return [idx for idx, name in enumerate(self.raw.ch_names) if name in self._selected_channels]
+        return [
+            idx
+            for idx, name in enumerate(self.raw.ch_names)
+            if name in self._selected_channels
+        ]
 
     def _on_show_all_channels(self, state: int) -> None:
         if state == Qt.Checked:
@@ -726,7 +726,8 @@ class TimeSeriesViewer(QWidget):
 
     def _adjust_zoom(self, multiplier: float, anchor_time: Optional[float] = None) -> None:
         self.view_span_seconds = max(
-            self.min_span_seconds, min(self.view_span_seconds * multiplier, self._max_span_seconds())
+            self.min_span_seconds,
+            min(self.view_span_seconds * multiplier, self._max_span_seconds()),
         )
         if anchor_time is not None:
             self._last_cursor_time = max(0.0, anchor_time)
@@ -919,22 +920,37 @@ class TimeSeriesViewer(QWidget):
             self.annotations_dirty_label.setText("Unsaved changes")
         else:
             self.annotations_dirty_label.setText("")
-        self.save_annotations_button.setEnabled(dirty and self._last_ts_path is not None)
+        self.save_annotations_button.setEnabled(dirty and self._annotation_csv_path() is not None)
+
+    def _annotation_csv_path(self) -> Optional[Path]:
+        if self._last_video_path is not None:
+            try:
+                return derive_annotation_path(
+                    self._last_video_path,
+                    processed_root=self.time_series_root,
+                    csv_root=self.annotation_root,
+                )
+            except ValueError:
+                return None
+        if self._last_ts_path is not None:
+            return self._last_ts_path.with_suffix(".csv")
+        return None
 
     def _save_annotations(self) -> None:
-        if self._last_ts_path is None:
+        csv_path = self._annotation_csv_path()
+        if csv_path is None:
             self.status_label.setText("No time series loaded to save annotations.")
             self._restore_plot_focus()
             return
 
-        csv_path = self._last_ts_path.with_suffix(".csv")
         try:
             annotations = self._current_annotations_for_save()
             expected_rows = self._write_annotations_csv(csv_path, annotations)
             actual_rows = self._count_csv_rows(csv_path)
             if actual_rows != expected_rows:
                 raise ValueError(
-                    f"Annotation CSV row count mismatch (expected {expected_rows}, got {actual_rows})."
+                    "Annotation CSV row count mismatch "
+                    f"(expected {expected_rows}, got {actual_rows})."
                 )
         except (OSError, csv.Error, ValueError) as exc:
             self.status_label.setText(f"Failed to save annotations: {exc}")
@@ -1017,7 +1033,9 @@ class TimeSeriesViewer(QWidget):
         onset, duration = self._normalize_region_values(start, end)
         annotation_item.annotation.onset = onset
         annotation_item.annotation.duration = duration
-        self._sync_annotation_regions(annotation_item.annotation, onset, duration, skip_region=region)
+        self._sync_annotation_regions(
+            annotation_item.annotation, onset, duration, skip_region=region
+        )
         self._set_selected_annotation(annotation_item.annotation, announce=False)
         self._set_annotations_dirty(True)
         self.status_label.setText("Annotation updated.")
@@ -1252,7 +1270,9 @@ class TimeSeriesViewer(QWidget):
 
         self._reset_annotation_drag()
 
-    def _prompt_for_description(self, title: str = "Add annotation", current_value: str = "") -> str:
+    def _prompt_for_description(
+        self, title: str = "Add annotation", current_value: str = ""
+    ) -> str:
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
 
@@ -1262,7 +1282,13 @@ class TimeSeriesViewer(QWidget):
         label_combo.setEditable(True)
         label_combo.setInsertPolicy(QComboBox.NoInsert)
 
-        labels = sorted({annotation.description for annotation in self._annotations if annotation.description})
+        labels = sorted(
+            {
+                annotation.description
+                for annotation in self._annotations
+                if annotation.description
+            }
+        )
         label_combo.addItems(labels)
 
         initial_value = current_value or self._last_annotation_description or ""
@@ -1324,10 +1350,18 @@ class TimeSeriesViewer(QWidget):
 
         current_position = self._last_cursor_time
         if direction == "next":
-            candidates = [annotation for annotation in annotations if annotation.onset > current_position]
+            candidates = [
+                annotation
+                for annotation in annotations
+                if annotation.onset > current_position
+            ]
             target = min(candidates, key=lambda entry: entry.onset, default=None)
         else:
-            candidates = [annotation for annotation in annotations if annotation.onset < current_position]
+            candidates = [
+                annotation
+                for annotation in annotations
+                if annotation.onset < current_position
+            ]
             target = max(candidates, key=lambda entry: entry.onset, default=None)
 
         if target is None:

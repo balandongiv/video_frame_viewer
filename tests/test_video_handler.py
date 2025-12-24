@@ -1,13 +1,13 @@
 """Unit tests for VideoHandler utilities."""
 import shutil
 import tempfile
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-from viewer.video_handler import VideoHandler
+from video_frame_viewer.video_handler import VideoHandler
 
 
 def create_temp_video(tmp_path: Path) -> Path:
