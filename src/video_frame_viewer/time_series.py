@@ -460,9 +460,10 @@ class TimeSeriesViewer(QWidget):
             widget.setLabel("left", channel_name, units=units)
         else:
             widget.setLabel("left", channel_name)
+        curves_to_add: List[pg.GraphicsObject] = []
         if channel_name == EAR_AVG_CHANNEL:
             pen = self._pen_for_channel(channel_name, 0)
-            curve = pg.ScatterPlotItem(
+            scatter = pg.ScatterPlotItem(
                 times,
                 channel,
                 pen=pen,
@@ -470,11 +471,18 @@ class TimeSeriesViewer(QWidget):
                 size=6,
                 symbol="o",
             )
-            widget.addItem(curve)
+            base_color = pen.color()
+            line_color = pg.mkColor(base_color)
+            line_color.setAlphaF(0.3)
+            line_pen = pg.mkPen(line_color, width=1)
+            line_curve = widget.plot(times, channel, pen=line_pen)
+            widget.addItem(scatter)
+            curves_to_add.extend([line_curve, scatter])
         else:
             curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
             curve.setDownsampling(auto=True, method="peak")
-        self._lane_curves[widget].append(curve)
+            curves_to_add.append(curve)
+        self._lane_curves[widget].extend(curves_to_add)
         self._lane_series[widget] = (times, channel)
         self._add_baseline(widget, channel_name, channel_type)
 
