@@ -28,14 +28,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from viewer.time_series import PROCESSED_ROOT, TimeSeriesViewer
-from viewer.utils import (
-    frame_to_pixmap,
+from video_frame_viewer.config import AppConfig
+from video_frame_viewer.time_series import TimeSeriesViewer
+from video_frame_viewer.utils import (
     find_md_mff_videos,
     find_mov_videos,
+    frame_to_pixmap,
     seconds_to_frame_index,
 )
-from viewer.video_handler import VideoHandler
+from video_frame_viewer.video_handler import VideoHandler
 
 
 class PannableLabel(QLabel):
@@ -81,21 +82,27 @@ class PannableLabel(QLabel):
 class VideoFrameViewer(QMainWindow):
     """Main window for browsing and navigating video frames."""
 
-    DATASET_ROOT = Path(r"D:\dataset\drowsy_driving_raja")
-    TEST_DATASET_ROOT = Path(__file__).resolve().parents[1] / "test_data" / "drowsy_driving_raja"
-    TEST_PROCESSED_ROOT = (
-        Path(__file__).resolve().parents[1] / "test_data" / "drowsy_driving_raja_processed"
-    )
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    TEST_DATASET_ROOT = PROJECT_ROOT / "test_data" / "drowsy_driving_raja"
+    TEST_PROCESSED_ROOT = PROJECT_ROOT / "test_data" / "drowsy_driving_raja_processed"
     SINGLE_STEP = 1
     JUMP_STEP = 10
     TIME_BASE_FPS = 30
     MIN_ZOOM = 0.25
     MAX_ZOOM = 10.0
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        config_path: Optional[Path] = None,
+        config_source: str = "",
+    ) -> None:
         super().__init__()
         self.setWindowTitle("Video Frame Viewer")
 
+        self.config = config
+        self.config_path = config_path
+        self.config_source = config_source
         self.video_handler = VideoHandler()
         self.video_paths: List[Path] = []
         self.current_frame_index: int = 0
@@ -105,7 +112,11 @@ class VideoFrameViewer(QMainWindow):
         self.sync_offset_seconds: float = 0.0
         self.zoom_factor: float = 1.0
         self.last_frame = None
-        self.time_series_viewer = TimeSeriesViewer()
+        self.time_series_viewer = TimeSeriesViewer(
+            time_series_root=self.config.time_series_root,
+            annotation_root=self.config.annotation_root,
+            ui_settings=self.config.ui,
+        )
         self.use_test_data = False
 
         self._setup_ui()
@@ -264,10 +275,12 @@ class VideoFrameViewer(QMainWindow):
         channels_tab.setLayout(channels_layout)
 
         navigation_tab = self._build_navigation_tab()
+        summary_tab = self._build_summary_tab()
 
         tabs.addTab(videos_tab, "Videos")
         tabs.addTab(channels_tab, "Channels")
         tabs.addTab(navigation_tab, "Navigation")
+        tabs.addTab(summary_tab, "Summary")
 
         return tabs
 
@@ -301,6 +314,26 @@ class VideoFrameViewer(QMainWindow):
         layout.addStretch()
         navigation_tab.setLayout(layout)
         return navigation_tab
+
+    def _build_summary_tab(self) -> QWidget:
+        summary_tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.summary_video_label = QLabel("Video: (none selected)")
+        self.summary_video_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_fif_label = QLabel("FIF: (not loaded)")
+        self.summary_fif_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_csv_label = QLabel("CSV: (not loaded)")
+        self.summary_csv_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        layout.addWidget(self.summary_video_label)
+        layout.addWidget(self.summary_fif_label)
+        layout.addWidget(self.summary_csv_label)
+        layout.addStretch()
+        summary_tab.setLayout(layout)
+        return summary_tab
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
@@ -391,14 +424,37 @@ class VideoFrameViewer(QMainWindow):
     # Directory logic
     def _browse_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
-            self, "Select dataset root", str(self.DATASET_ROOT)
+            self, "Select dataset root", str(self.config.dataset_root)
         )
         if selected:
             self.directory_input.setText(selected)
             self._scan_directory()
 
+    def _video_root_for(self, dataset_root: Path) -> Path:
+        if self.config.mov_dir:
+            return (dataset_root / self.config.mov_dir).expanduser()
+        return dataset_root
+
+    def _time_series_root_for(self, dataset_root: Path) -> Path:
+        if self.config.fif_dir:
+            return (dataset_root / self.config.fif_dir).expanduser()
+        return dataset_root.parent / f"{dataset_root.name}_processed"
+
+    def _annotation_root_for(self, dataset_root: Path) -> Path:
+        if self.config.csv_dir:
+            return (dataset_root / self.config.csv_dir).expanduser()
+        return self._time_series_root_for(dataset_root)
+
     def _initialize_dataset_root(self) -> None:
-        self.directory_input.setText(str(self.DATASET_ROOT))
+        self.directory_input.setText(str(self.config.dataset_root))
+        self.time_series_viewer.set_processed_root(self.config.time_series_root)
+        self.time_series_viewer.set_annotation_root(self.config.annotation_root)
+        if self.config_path:
+            self._set_status(
+                f"Loaded configuration from {self.config_path} (source: {self.config_source})."
+            )
+        else:
+            self._set_status(f"Using configuration source: {self.config_source or 'default'}.")
         self._scan_directory()
 
     def _toggle_debug_data(self, state: int) -> None:
@@ -406,29 +462,56 @@ class VideoFrameViewer(QMainWindow):
         if self.use_test_data:
             self.directory_input.setText(str(self.TEST_DATASET_ROOT))
             self.time_series_viewer.set_processed_root(self.TEST_PROCESSED_ROOT)
+            self.time_series_viewer.set_annotation_root(self.TEST_PROCESSED_ROOT)
             self._set_status("Debug mode enabled: using bundled test data.")
         else:
-            self.directory_input.setText(str(self.DATASET_ROOT))
-            self.time_series_viewer.set_processed_root(PROCESSED_ROOT)
+            self.directory_input.setText(str(self.config.dataset_root))
+            self.time_series_viewer.set_processed_root(self.config.time_series_root)
+            self.time_series_viewer.set_annotation_root(self.config.annotation_root)
             self._set_status("Debug mode disabled: using default dataset paths.")
         self._scan_directory()
 
     def _scan_directory(self) -> None:
         root_text = self.directory_input.text().strip()
-        root_path = Path(root_text).expanduser() if root_text else self.DATASET_ROOT
-        self.directory_input.setText(str(root_path))
+        default_root = self.TEST_DATASET_ROOT if self.use_test_data else self.config.dataset_root
+        dataset_root = (
+            Path(root_text).expanduser().resolve()
+            if root_text
+            else default_root.expanduser().resolve()
+        )
+        self.directory_input.setText(str(dataset_root))
 
-        if not root_path.exists():
+        if not dataset_root.exists():
             self.video_list.clear()
             self._set_status(
-                f"Dataset root not found at {root_path}. Please choose another folder."
+                f"Dataset root not found at {dataset_root}. Please choose another folder."
             )
             return
 
         if self.use_test_data:
-            self.video_paths = find_mov_videos(root_path)
+            video_root = self.TEST_DATASET_ROOT
+            time_series_root = self.TEST_PROCESSED_ROOT
+            annotation_root = self.TEST_PROCESSED_ROOT
         else:
-            self.video_paths = find_md_mff_videos(root_path)
+            video_root = self._video_root_for(dataset_root)
+            time_series_root = self._time_series_root_for(dataset_root)
+            annotation_root = self._annotation_root_for(dataset_root)
+
+        self.time_series_viewer.set_processed_root(time_series_root)
+        self.time_series_viewer.set_annotation_root(annotation_root)
+
+        if not video_root.exists():
+            self.video_list.clear()
+            self._set_status(
+                "Video directory not found at "
+                f"{video_root}. Check dataset_root and mov_dir in your config."
+            )
+            return
+
+        if self.use_test_data:
+            self.video_paths = find_mov_videos(video_root)
+        else:
+            self.video_paths = find_md_mff_videos(video_root)
 
         self.video_list.clear()
         for video_path in sorted(self.video_paths):
@@ -443,6 +526,7 @@ class VideoFrameViewer(QMainWindow):
         else:
             descriptor = "test .mov" if self.use_test_data else "MD.mff .mov"
             self._set_status(f"No {descriptor} files found in the dataset root.")
+        self._update_summary(None, None, None, None, None)
 
     def _load_selected_video(self) -> None:
         selected_items = self.video_list.selectedItems()
@@ -454,12 +538,16 @@ class VideoFrameViewer(QMainWindow):
             self._set_status("Unable to open the selected video.")
             self._update_navigation_state(False)
             self.time_series_viewer.load_for_video(None)
+            self._update_summary(video_path, None, None, None, None)
             return
 
         has_frames = self.video_handler.frame_count > 0
         self.current_frame_index = 0
         self._update_navigation_state(has_frames)
         self.time_series_viewer.load_for_video(video_path)
+        expected_fif, expected_csv = self.time_series_viewer.expected_paths()
+        loaded_fif, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        self._update_summary(video_path, expected_fif, expected_csv, loaded_fif, loaded_csv)
 
         if has_frames:
             self._goto_frame(0, show_status=False)
@@ -515,7 +603,8 @@ class VideoFrameViewer(QMainWindow):
         self.shift_value = int(round(self.sync_offset_seconds * self.TIME_BASE_FPS))
         self.shift_input.setText(str(self.shift_value))
         self._set_status(
-            f"Sync offset set to {self.sync_offset_seconds:+.3f} second(s) ({self.shift_value:+d} frame(s))."
+            f"Sync offset set to {self.sync_offset_seconds:+.3f} second(s) "
+            f"({self.shift_value:+d} frame(s))."
         )
         self._update_time_series_cursor()
         self._update_frame_label()
@@ -604,8 +693,14 @@ class VideoFrameViewer(QMainWindow):
         self._update_time_series_cursor()
         if show_status:
             self._set_status(
-                f"Displaying frame {clamped_index} of {self.video_handler.frame_count - 1} (0-based)."
+                f"Displaying frame {clamped_index} of "
+                f"{self.video_handler.frame_count - 1} (0-based)."
             )
+        expected_fif, expected_csv = self.time_series_viewer.expected_paths()
+        loaded_fif, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        self._update_summary(
+            self.video_handler.video_path, expected_fif, expected_csv, loaded_fif, loaded_csv
+        )
 
     # Display helpers
     def _display_frame(self, frame) -> None:
@@ -742,6 +837,33 @@ class VideoFrameViewer(QMainWindow):
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)
 
+    def _update_summary(
+        self,
+        video_path: Optional[Path],
+        expected_fif: Optional[Path],
+        expected_csv: Optional[Path],
+        loaded_fif: Optional[Path],
+        loaded_csv: Optional[Path],
+    ) -> None:
+        self.summary_video_label.setText(
+            self._format_summary_line("Video", video_path, loaded=video_path is not None)
+        )
+        self.summary_fif_label.setText(
+            self._format_summary_line("FIF", expected_fif, loaded_fif is not None)
+        )
+        self.summary_csv_label.setText(
+            self._format_summary_line("CSV", expected_csv, loaded_csv is not None)
+        )
+
+    def _format_summary_line(self, label: str, path: Optional[Path], loaded: bool) -> str:
+        if path is None:
+            status = "not selected"
+            return f"{label}: ({status})"
+
+        exists = "found" if path.exists() else "missing"
+        state = "loaded" if loaded else "expected"
+        return f"{label}: {path} [{state}, {exists}]"
+
     def _setup_shortcuts(self) -> None:
         left_shortcut = QShortcut(QKeySequence(Qt.Key_Left), self)
         left_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -771,6 +893,12 @@ class VideoFrameViewer(QMainWindow):
         next_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         next_annotation_letter.activated.connect(self._handle_next_annotation_shortcut)
 
+        next_annotation_min_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_N), self)
+        next_annotation_min_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        next_annotation_min_shortcut.activated.connect(
+            self._handle_next_annotation_min_shortcut
+        )
+
         previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_P), self)
         previous_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         previous_annotation_letter.activated.connect(self._handle_previous_annotation_shortcut)
@@ -786,6 +914,7 @@ class VideoFrameViewer(QMainWindow):
         self.next_annotation_shortcut = next_annotation_shortcut
         self.previous_annotation_shortcut = previous_annotation_shortcut
         self.next_annotation_letter = next_annotation_letter
+        self.next_annotation_min_shortcut = next_annotation_min_shortcut
         self.previous_annotation_letter = previous_annotation_letter
         self.save_annotations_shortcut = save_annotations_shortcut
 
@@ -800,6 +929,10 @@ class VideoFrameViewer(QMainWindow):
     def _handle_next_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.jump_to_next_annotation()
+
+    def _handle_next_annotation_min_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.jump_to_next_annotation_minimum()
 
     def _handle_previous_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
