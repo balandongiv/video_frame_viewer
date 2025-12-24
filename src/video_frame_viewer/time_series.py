@@ -389,11 +389,6 @@ class TimeSeriesViewer(QWidget):
         if times is None:
             return
 
-        decimation = max(1, data.shape[1] // self.max_points)
-        if decimation > 1:
-            data = data[:, ::decimation]
-            times = times[::decimation]
-
         channel_names = [self.raw.ch_names[index] for index in picks]
         channel_types = self.raw.get_channel_types(picks=picks)
         data, picks, channel_names, channel_types = self._order_channels_for_display(
@@ -465,8 +460,20 @@ class TimeSeriesViewer(QWidget):
             widget.setLabel("left", channel_name, units=units)
         else:
             widget.setLabel("left", channel_name)
-        curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
-        curve.setDownsampling(auto=True, method="peak")
+        if channel_name == EAR_AVG_CHANNEL:
+            pen = self._pen_for_channel(channel_name, 0)
+            curve = pg.ScatterPlotItem(
+                times,
+                channel,
+                pen=pen,
+                brush=pg.mkBrush(pen.color()),
+                size=6,
+                symbol="o",
+            )
+            widget.addItem(curve)
+        else:
+            curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
+            curve.setDownsampling(auto=True, method="peak")
         self._lane_curves[widget].append(curve)
         self._lane_series[widget] = (times, channel)
         self._add_baseline(widget, channel_name, channel_type)
