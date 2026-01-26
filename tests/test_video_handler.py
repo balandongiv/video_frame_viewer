@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from video_frame_viewer.video_handler import VideoHandler
+from src.video_handler import VideoHandler
 
 
 def create_temp_video(tmp_path: Path) -> Path:

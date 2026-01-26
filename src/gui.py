@@ -28,15 +28,14 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from video_frame_viewer.config import AppConfig
-from video_frame_viewer.time_series import TimeSeriesViewer
-from video_frame_viewer.utils import (
+from src.config import AppConfig
+from src.time_series import TimeSeriesViewer
+from src.utils import (
     find_md_mff_videos,
-    find_mov_videos,
-    frame_to_pixmap,
+    is_md_mff_video,
     seconds_to_frame_index,
 )
-from video_frame_viewer.video_handler import VideoHandler
+from src.video_handler import VideoHandler
 
 
 class PannableLabel(QLabel):

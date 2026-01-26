@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from video_frame_viewer.config import (
+from src.config import (
     ENV_CONFIG_PATH,
     ENV_DATASET_ROOT,
     AppConfig,
@@ -46,7 +46,7 @@ class ResolveConfigTests(TestCase):
 
     def test_missing_configuration_raises_without_prompt(self) -> None:
         with patch.dict(os.environ, {}, clear=True), patch(
-            "video_frame_viewer.config._find_repo_config", return_value=None
+            "src.config._find_repo_config", return_value=None
         ):
             with self.assertRaises(ConfigNotFoundError):
                 resolve_config(allow_prompt=False)
