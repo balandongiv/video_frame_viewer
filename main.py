@@ -1,4 +1,5 @@
-"""Entry point for running the Video Frame Viewer from a source checkout."""
+"""Entry point for running the Video Frame Viewer from a source checkout.
+g"""
 import sys
 from pathlib import Path
 
