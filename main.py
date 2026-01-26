@@ -1,4 +1,5 @@
-"""Entry point for running the Video Frame Viewer from a source checkout."""
+"""Entry point for running the Video Frame Viewer from a source checkout.
+g"""
 import sys
 from pathlib import Path
 
@@ -7,7 +8,7 @@ SRC_DIR = CURRENT_DIR / "src"
 if SRC_DIR.exists():
     sys.path.insert(0, str(SRC_DIR))
 
-from src.cli import main  # noqa: E402
+from cli import main  # noqa: E402
 
 if __name__ == "__main__":
     raise SystemExit(main())

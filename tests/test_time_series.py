@@ -1,9 +1,8 @@
 import unittest
 from pathlib import Path
 
-from src.config import AppConfig
-from src.paths import derive_annotation_path, derive_time_series_path
-from src.time_series import TimeSeriesViewer
+from config import AppConfig
+from paths import derive_annotation_path, derive_time_series_path
 
 
 class DeriveTimeSeriesPathTests(unittest.TestCase):

@@ -6,9 +6,9 @@ import logging
 import sys
 from pathlib import Path
 
-from src import __version__
-from src.app import launch_app
-from src.config import (
+from version import __version__
+from app import launch_app
+from config import (
     AppConfig,
     ConfigNotFoundError,
     ConfigResolution,

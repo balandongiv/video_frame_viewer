@@ -7,8 +7,8 @@ from typing import Optional
 
 from PyQt5.QtWidgets import QApplication
 
-from src.config import AppConfig
-from src.gui import VideoFrameViewer
+from config import AppConfig
+from gui import VideoFrameViewer
 
 
 def launch_app(
