@@ -389,7 +389,7 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(apply_sync_offset_button, 3, 2)
 
         self.status_dropdown = QComboBox()
-        self.status_dropdown.addItems(["Pending", "Ongoing", "Complete"])
+        self.status_dropdown.addItems(["Pending", "Ongoing", "Complete","Issue"])
         self.status_dropdown.currentTextChanged.connect(self._on_status_changed)
         control_layout.addWidget(QLabel("Status:"), 4, 0)
         control_layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
