@@ -37,7 +37,6 @@ drowsy-viewer = "cli:main"
 
 # [tool.hatch.build.targets.wheel]
 # packages = ["src/video_frame_viewer"]
-
 [tool.ruff]
 target-version = "py39"
 line-length = 100
