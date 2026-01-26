@@ -2,7 +2,11 @@
 from pathlib import Path
 from typing import List, Optional
 
+import yaml
 from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
+
+SESSION_FILENAME = "VideoFrameViewers.yaml"
+
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -28,15 +32,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from video_frame_viewer.config import AppConfig
-from video_frame_viewer.time_series import TimeSeriesViewer
-from video_frame_viewer.utils import (
+from config import AppConfig
+from time_series import TimeSeriesViewer
+from utils import (
     find_md_mff_videos,
     find_mov_videos,
     frame_to_pixmap,
     seconds_to_frame_index,
 )
-from video_frame_viewer.video_handler import VideoHandler
+from video_handler import VideoHandler
 
 
 class PannableLabel(QLabel):
@@ -533,6 +537,8 @@ class VideoFrameViewer(QMainWindow):
         if not selected_items:
             return
 
+        self._save_session_state()
+
         video_path = Path(selected_items[0].text())
         if not self.video_handler.load(video_path):
             self._set_status("Unable to open the selected video.")
@@ -551,11 +557,58 @@ class VideoFrameViewer(QMainWindow):
 
         if has_frames:
             self._goto_frame(0, show_status=False)
+            self._load_session_state()
             self._set_status(
                 f"Loaded video: {video_path.name}. Total frames: {self.video_handler.frame_count}"
             )
         else:
             self._set_status("The selected video contains no frames.")
+
+    def _save_session_state(self) -> None:
+        _, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        if loaded_csv is None or not loaded_csv.parent.exists():
+            return
+
+        session_path = loaded_csv.parent / SESSION_FILENAME
+        data = {
+            "shift_frame": self.shift_value,
+            "stop_position": self.current_frame_index
+        }
+        try:
+            with session_path.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f)
+        except Exception as e:
+            self._set_status(f"Failed to save session state: {e}")
+
+    def _load_session_state(self) -> None:
+        _, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        if loaded_csv is None:
+            return
+
+        session_path = loaded_csv.parent / SESSION_FILENAME
+        if not session_path.exists():
+            # Reset shift to 0 for new sessions without history
+            self.shift_input.setText("0")
+            self._apply_shift()
+            return
+
+        try:
+            with session_path.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+
+            shift = data.get("shift_frame", 0)
+            stop_pos = data.get("stop_position", 0)
+
+            self.shift_input.setText(str(shift))
+            self._apply_shift()
+
+            if stop_pos > 0:
+                self._goto_frame(stop_pos, show_status=False)
+
+            self._set_status(f"Resumed session: shift {shift}, frame {stop_pos}")
+
+        except Exception as e:
+            self._set_status(f"Failed to load session state: {e}")
 
     # Shift and navigation logic
     def _apply_shift(self) -> None:
@@ -582,6 +635,7 @@ class VideoFrameViewer(QMainWindow):
         )
         self._update_time_series_cursor()
         self._update_frame_label()
+        self._save_session_state()
 
     def _apply_sync_offset(self) -> None:
         offset_text = self.sync_offset_input.text().strip()
@@ -608,6 +662,7 @@ class VideoFrameViewer(QMainWindow):
         )
         self._update_time_series_cursor()
         self._update_frame_label()
+        self._save_session_state()
 
     def _search_frame(self) -> None:
         if not self.video_handler.capture:
@@ -946,6 +1001,7 @@ class VideoFrameViewer(QMainWindow):
         return not isinstance(focus_widget, (QLineEdit, QSpinBox))
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._save_session_state()
         self.video_handler.release()
         super().closeEvent(event)
 

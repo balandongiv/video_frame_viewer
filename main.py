@@ -8,7 +8,7 @@ SRC_DIR = CURRENT_DIR / "src"
 if SRC_DIR.exists():
     sys.path.insert(0, str(SRC_DIR))
 
-from video_frame_viewer.cli import main  # noqa: E402
+from cli import main  # noqa: E402
 
 if __name__ == "__main__":
     raise SystemExit(main())

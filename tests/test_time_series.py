@@ -1,8 +1,8 @@
 import unittest
 from pathlib import Path
 
-from video_frame_viewer.config import AppConfig
-from video_frame_viewer.paths import derive_annotation_path, derive_time_series_path
+from config import AppConfig
+from paths import derive_annotation_path, derive_time_series_path
 
 
 class DeriveTimeSeriesPathTests(unittest.TestCase):

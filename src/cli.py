@@ -6,9 +6,9 @@ import logging
 import sys
 from pathlib import Path
 
-from video_frame_viewer import __version__
-from video_frame_viewer.app import launch_app
-from video_frame_viewer.config import (
+from version import __version__
+from app import launch_app
+from config import (
     AppConfig,
     ConfigNotFoundError,
     ConfigResolution,

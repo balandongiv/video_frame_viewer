@@ -36,7 +36,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from video_frame_viewer.paths import derive_annotation_path, derive_time_series_path
+from paths import derive_annotation_path, derive_time_series_path
 
 PRIMARY_CHANNEL = "EEG-E8"
 EAR_AVG_CHANNEL = "EAR-avg_ear"
