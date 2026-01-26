@@ -11,6 +11,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -116,6 +117,7 @@ class VideoFrameViewer(QMainWindow):
         self.sync_offset_seconds: float = 0.0
         self.zoom_factor: float = 1.0
         self.last_frame = None
+        self.status_value: str = "Pending"
         self.time_series_viewer = TimeSeriesViewer(
             time_series_root=self.config.time_series_root,
             annotation_root=self.config.annotation_root,
@@ -386,6 +388,12 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(self.sync_offset_input, 3, 1)
         control_layout.addWidget(apply_sync_offset_button, 3, 2)
 
+        self.status_dropdown = QComboBox()
+        self.status_dropdown.addItems(["Pending", "Ongoing", "Complete"])
+        self.status_dropdown.currentTextChanged.connect(self._on_status_changed)
+        control_layout.addWidget(QLabel("Status:"), 4, 0)
+        control_layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
+
         navigation_layout = QHBoxLayout()
         self.left_button = QPushButton("Left")
         self.right_button = QPushButton("Right")
@@ -397,12 +405,7 @@ class VideoFrameViewer(QMainWindow):
         self.left_jump_button.clicked.connect(self._trigger_left_jump)
         self.right_jump_button.clicked.connect(self._trigger_right_jump)
 
-        navigation_layout.addWidget(self.left_button)
-        navigation_layout.addWidget(self.right_button)
-        navigation_layout.addWidget(self.left_jump_button)
-        navigation_layout.addWidget(self.right_jump_button)
-
-        control_layout.addLayout(navigation_layout, 4, 0, 1, 3)
+        control_layout.addLayout(navigation_layout, 5, 0, 1, 3)
 
         zoom_layout = QHBoxLayout()
         self.zoom_out_button = QPushButton("Zoom -")
@@ -418,10 +421,10 @@ class VideoFrameViewer(QMainWindow):
         zoom_layout.addWidget(self.zoom_reset_button)
         zoom_layout.addWidget(self.zoom_label)
 
-        control_layout.addLayout(zoom_layout, 5, 0, 1, 3)
+        control_layout.addLayout(zoom_layout, 6, 0, 1, 3)
 
         self.current_frame_label = QLabel("Current frame: -")
-        control_layout.addWidget(self.current_frame_label, 6, 0, 1, 3)
+        control_layout.addWidget(self.current_frame_label, 7, 0, 1, 3)
 
         return control_group
 
@@ -572,7 +575,8 @@ class VideoFrameViewer(QMainWindow):
         session_path = loaded_csv.parent / SESSION_FILENAME
         data = {
             "shift_frame": self.shift_value,
-            "stop_position": self.current_frame_index
+            "stop_position": self.current_frame_index,
+            "status": self.status_value
         }
         try:
             with session_path.open("w", encoding="utf-8") as f:
@@ -587,9 +591,10 @@ class VideoFrameViewer(QMainWindow):
 
         session_path = loaded_csv.parent / SESSION_FILENAME
         if not session_path.exists():
-            # Reset shift to 0 for new sessions without history
+            # Reset shift to 0 and status to Pending for new sessions without history
             self.shift_input.setText("0")
             self._apply_shift()
+            self.status_dropdown.setCurrentText("Pending")
             return
 
         try:
@@ -598,17 +603,25 @@ class VideoFrameViewer(QMainWindow):
 
             shift = data.get("shift_frame", 0)
             stop_pos = data.get("stop_position", 0)
+            status = data.get("status", "Pending")
 
             self.shift_input.setText(str(shift))
             self._apply_shift()
 
+            self.status_dropdown.setCurrentText(status)
+            self.status_value = status
+
             if stop_pos > 0:
                 self._goto_frame(stop_pos, show_status=False)
 
-            self._set_status(f"Resumed session: shift {shift}, frame {stop_pos}")
+            self._set_status(f"Resumed session: shift {shift}, frame {stop_pos}, status {status}")
 
         except Exception as e:
             self._set_status(f"Failed to load session state: {e}")
+
+    def _on_status_changed(self, text: str) -> None:
+        self.status_value = text
+        self._save_session_state()
 
     # Shift and navigation logic
     def _apply_shift(self) -> None:
