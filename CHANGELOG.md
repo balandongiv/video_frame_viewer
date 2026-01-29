@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2025-09-27
+
+### Added
+- Show per-subject counts of missing CSV and missing FIF files in the Summary tab table.
+
 ## [0.4.0] - 2025-09-27
 
 ### Added

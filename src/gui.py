@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
 )
 
 from config import AppConfig
-from paths import derive_annotation_path
+from paths import derive_annotation_path, derive_time_series_path
 from time_series import TimeSeriesViewer
 from utils import (
     extract_subject_label,
@@ -343,9 +343,17 @@ class VideoFrameViewer(QMainWindow):
         self.summary_overall_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary_overall_label.setWordWrap(True)
 
-        self.summary_table = QTableWidget(0, 5)
+        self.summary_table = QTableWidget(0, 7)
         self.summary_table.setHorizontalHeaderLabels(
-            ["Subject", "Pending", "Ongoing", "Complete", "Issue"]
+            [
+                "Subject",
+                "Pending",
+                "Ongoing",
+                "Complete",
+                "Issue",
+                "Missing CSV",
+                "Missing FIF",
+            ]
         )
         self.summary_table.horizontalHeader().setStretchLastSection(True)
         self.summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -992,12 +1000,29 @@ class VideoFrameViewer(QMainWindow):
         for video_path in self.video_paths:
             subject = extract_subject_label(video_path) or "Unknown"
             subject_counts = self.summary_subject_counts.setdefault(
-                subject, {"Pending": 0, "Ongoing": 0, "Complete": 0, "Issue": 0}
+                subject,
+                {
+                    "Pending": 0,
+                    "Ongoing": 0,
+                    "Complete": 0,
+                    "Issue": 0,
+                    "Missing CSV": 0,
+                    "Missing FIF": 0,
+                },
             )
             status = self._status_for_video(video_path)
             subject_counts[status] += 1
+            subject_counts["Missing CSV"] += int(self._missing_csv(video_path))
+            subject_counts["Missing FIF"] += int(self._missing_fif(video_path))
 
-        totals = {"Pending": 0, "Ongoing": 0, "Complete": 0, "Issue": 0}
+        totals = {
+            "Pending": 0,
+            "Ongoing": 0,
+            "Complete": 0,
+            "Issue": 0,
+            "Missing CSV": 0,
+            "Missing FIF": 0,
+        }
         for counts in self.summary_subject_counts.values():
             for key in totals:
                 totals[key] += counts.get(key, 0)
@@ -1009,7 +1034,9 @@ class VideoFrameViewer(QMainWindow):
             f"Pending: {totals['Pending']}, "
             f"Ongoing: {totals['Ongoing']}, "
             f"Complete: {totals['Complete']}, "
-            f"Issue: {totals['Issue']}"
+            f"Issue: {totals['Issue']} | "
+            f"Missing CSV: {totals['Missing CSV']}, "
+            f"Missing FIF: {totals['Missing FIF']}"
         )
         self._update_summary_table()
 
@@ -1053,11 +1080,34 @@ class VideoFrameViewer(QMainWindow):
                 str(counts.get("Ongoing", 0)),
                 str(counts.get("Complete", 0)),
                 str(counts.get("Issue", 0)),
+                str(counts.get("Missing CSV", 0)),
+                str(counts.get("Missing FIF", 0)),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.summary_table.setItem(row, col, item)
+
+    def _missing_csv(self, video_path: Path) -> bool:
+        try:
+            csv_path = derive_annotation_path(
+                video_path,
+                processed_root=self.time_series_viewer.time_series_root,
+                csv_root=self.time_series_viewer.annotation_root,
+            )
+        except ValueError:
+            return True
+        return not csv_path.exists()
+
+    def _missing_fif(self, video_path: Path) -> bool:
+        try:
+            ts_path = derive_time_series_path(
+                video_path,
+                processed_root=self.time_series_viewer.time_series_root,
+            )
+        except ValueError:
+            return True
+        return not ts_path.exists()
 
     def _setup_shortcuts(self) -> None:
         left_shortcut = QShortcut(QKeySequence(Qt.Key_Left), self)
