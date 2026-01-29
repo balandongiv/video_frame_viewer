@@ -6,7 +6,6 @@ import logging
 import sys
 from pathlib import Path
 
-from version import __version__
 from app import launch_app
 from config import (
     AppConfig,
@@ -15,6 +14,7 @@ from config import (
     resolve_config,
     save_config,
 )
+from version import __version__
 
 LOGGER = logging.getLogger(__name__)
 

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2025-09-27
+
+### Added
+- Added a remarks editor in the Summary tab and persist remarks in the per-video session YAML.
+
 ## [0.3.0] - 2025-09-27
 
 ### Added

@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -350,11 +351,26 @@ class VideoFrameViewer(QMainWindow):
         self.summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.summary_table.setSelectionMode(QTableWidget.NoSelection)
 
+        remark_group = QGroupBox("Remarks")
+        remark_layout = QVBoxLayout()
+        remark_group.setLayout(remark_layout)
+        self.remark_input = QTextEdit()
+        self.remark_input.setPlaceholderText("Enter remarks for this video session...")
+        self.remark_input.setMinimumHeight(80)
+        remark_buttons = QHBoxLayout()
+        self.remark_save_button = QPushButton("Save Remark")
+        self.remark_save_button.clicked.connect(self._save_remark)
+        remark_buttons.addStretch()
+        remark_buttons.addWidget(self.remark_save_button)
+        remark_layout.addWidget(self.remark_input)
+        remark_layout.addLayout(remark_buttons)
+
         layout.addWidget(self.summary_video_label)
         layout.addWidget(self.summary_fif_label)
         layout.addWidget(self.summary_csv_label)
         layout.addWidget(self.summary_overall_label)
         layout.addWidget(self.summary_table)
+        layout.addWidget(remark_group)
         layout.addStretch()
         summary_tab.setLayout(layout)
         return summary_tab
@@ -596,6 +612,7 @@ class VideoFrameViewer(QMainWindow):
             "shift_frame": self.shift_value,
             "stop_position": self.current_frame_index,
             "status": self.status_value,
+            "remark": self.remark_input.toPlainText().strip(),
         }
         try:
             with session_path.open("w", encoding="utf-8") as f:
@@ -615,6 +632,7 @@ class VideoFrameViewer(QMainWindow):
             self.shift_input.setText("0")
             self._apply_shift()
             self.status_dropdown.setCurrentText("Pending")
+            self.remark_input.setPlainText("")
             return
 
         try:
@@ -624,12 +642,14 @@ class VideoFrameViewer(QMainWindow):
             shift = data.get("shift_frame", 0)
             stop_pos = data.get("stop_position", 0)
             status = data.get("status", "Pending")
+            remark = data.get("remark", "")
 
             self.shift_input.setText(str(shift))
             self._apply_shift()
 
             self.status_dropdown.setCurrentText(status)
             self.status_value = status
+            self.remark_input.setPlainText(str(remark))
 
             if stop_pos > 0:
                 self._goto_frame(stop_pos, show_status=False)
@@ -642,6 +662,13 @@ class VideoFrameViewer(QMainWindow):
     def _on_status_changed(self, text: str) -> None:
         self.status_value = text
         self._save_session_state()
+
+    def _save_remark(self) -> None:
+        if not self.video_handler.capture:
+            self._set_status("Load a video before saving remarks.")
+            return
+        self._save_session_state()
+        self._set_status("Remark saved.")
 
     # Shift and navigation logic
     def _apply_shift(self) -> None:
@@ -858,6 +885,8 @@ class VideoFrameViewer(QMainWindow):
             self.time_search_button,
         ]:
             button.setEnabled(enabled)
+        self.remark_input.setEnabled(enabled)
+        self.remark_save_button.setEnabled(enabled)
 
     def _adjust_zoom(self, delta: float, anchor: Optional[QPoint] = None) -> None:
         self._set_zoom(self.zoom_factor + delta, anchor)
