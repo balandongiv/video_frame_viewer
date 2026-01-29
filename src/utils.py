@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
@@ -97,3 +98,28 @@ def find_mov_videos(root: Path) -> List[Path]:
                 videos.append(candidate)
 
     return videos
+
+
+def extract_subject_label(path: Path) -> Optional[str]:
+    """Extract a normalized subject label (e.g., ``S1``) from a path."""
+
+    subject_pattern = re.compile(r"^s(\d+)$", re.IGNORECASE)
+    for part in path.parts:
+        match = subject_pattern.match(part)
+        if match:
+            return f"S{int(match.group(1))}"
+
+    stem_match = re.search(r"s(\d+)", path.stem, re.IGNORECASE)
+    if stem_match:
+        return f"S{int(stem_match.group(1))}"
+
+    return None
+
+
+def subject_sort_key(path: Path) -> tuple[int, str]:
+    """Sort videos by subject number, falling back to path ordering."""
+
+    label = extract_subject_label(path)
+    if label is not None:
+        return (int(label[1:]), str(path).lower())
+    return (1_000_000, str(path).lower())
