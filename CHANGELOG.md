@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.4] - 2025-09-27
+
+### Fixed
+- Preserved the top of zoomed frames by letting the scroll area track the full pixmap size.
+
 ## [0.7.3] - 2025-09-27
 
 ### Fixed
