@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2025-09-27
+
+### Added
+- Display saved remark history in the Summary tab for each video session.
+
 ## [0.7.4] - 2025-09-27
 
 ### Fixed

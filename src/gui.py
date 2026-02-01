@@ -1,4 +1,5 @@
 """PyQt5 GUI for the video frame viewer application."""
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -395,8 +396,14 @@ class VideoFrameViewer(QMainWindow):
         self.remark_save_button.clicked.connect(self._save_remark)
         remark_buttons.addStretch()
         remark_buttons.addWidget(self.remark_save_button)
+        self.remark_history_label = QLabel("Saved remarks:")
+        self.remark_history_list = QListWidget()
+        self.remark_history_list.setSelectionMode(QListWidget.NoSelection)
+        self.remark_history_list.setMinimumHeight(120)
         remark_layout.addWidget(self.remark_input)
         remark_layout.addLayout(remark_buttons)
+        remark_layout.addWidget(self.remark_history_label)
+        remark_layout.addWidget(self.remark_history_list)
 
         layout.addWidget(self.summary_video_label)
         layout.addWidget(self.summary_fif_label)
@@ -644,11 +651,22 @@ class VideoFrameViewer(QMainWindow):
             return
 
         session_path = loaded_csv.parent / SESSION_FILENAME
+        existing_data = {}
+        if session_path.exists():
+            try:
+                with session_path.open("r", encoding="utf-8") as f:
+                    existing_data = yaml.safe_load(f) or {}
+            except Exception:
+                existing_data = {}
+        remarks = existing_data.get("remarks")
+        if not isinstance(remarks, list):
+            remarks = []
         data = {
             "shift_frame": self.shift_value,
             "stop_position": self.current_frame_index,
             "status": self.status_value,
             "remark": self.remark_input.toPlainText().strip(),
+            "remarks": remarks,
         }
         try:
             with session_path.open("w", encoding="utf-8") as f:
@@ -669,6 +687,7 @@ class VideoFrameViewer(QMainWindow):
             self._apply_shift()
             self.status_dropdown.setCurrentText("Pending")
             self.remark_input.setPlainText("")
+            self._refresh_remark_history([])
             return
 
         try:
@@ -686,6 +705,8 @@ class VideoFrameViewer(QMainWindow):
             self.status_dropdown.setCurrentText(status)
             self.status_value = status
             self.remark_input.setPlainText(str(remark))
+            remarks = self._extract_remarks(data)
+            self._refresh_remark_history(remarks)
 
             if stop_pos > 0:
                 self._goto_frame(stop_pos, show_status=False)
@@ -694,6 +715,7 @@ class VideoFrameViewer(QMainWindow):
 
         except Exception as e:
             self._set_status(f"Failed to load session state: {e}")
+            self._refresh_remark_history([])
 
     def _on_status_changed(self, text: str) -> None:
         self.status_value = text
@@ -703,8 +725,55 @@ class VideoFrameViewer(QMainWindow):
         if not self.video_handler.capture:
             self._set_status("Load a video before saving remarks.")
             return
+        remark_text = self.remark_input.toPlainText().strip()
+        if not remark_text:
+            self._set_status("Enter a remark before saving.")
+            return
+        _, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        if loaded_csv is None:
+            self._set_status("Remarks storage is unavailable for this video.")
+            return
+        session_path = loaded_csv.parent / SESSION_FILENAME
+        data = {}
+        if session_path.exists():
+            try:
+                with session_path.open("r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except Exception:
+                data = {}
+        remarks = self._extract_remarks(data)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        remarks.append(f"{timestamp} — {remark_text}")
+        data.update(
+            {
+                "shift_frame": self.shift_value,
+                "stop_position": self.current_frame_index,
+                "status": self.status_value,
+                "remark": remark_text,
+                "remarks": remarks,
+            }
+        )
+        try:
+            with session_path.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f)
+        except Exception as e:
+            self._set_status(f"Failed to save remark: {e}")
+            return
         self._save_session_state()
+        self._refresh_remark_history(remarks)
         self._set_status("Remark saved.")
+
+    def _extract_remarks(self, data: dict) -> list[str]:
+        remarks = data.get("remarks")
+        if isinstance(remarks, list):
+            return [str(item).strip() for item in remarks if str(item).strip()]
+        remark = str(data.get("remark", "")).strip()
+        return [remark] if remark else []
+
+    def _refresh_remark_history(self, remarks: list[str]) -> None:
+        self.remark_history_list.clear()
+        for remark in remarks:
+            self.remark_history_list.addItem(remark)
 
     # Shift and navigation logic
     def _apply_shift(self) -> None:
@@ -923,6 +992,8 @@ class VideoFrameViewer(QMainWindow):
             button.setEnabled(enabled)
         self.remark_input.setEnabled(enabled)
         self.remark_save_button.setEnabled(enabled)
+        self.remark_history_label.setEnabled(enabled)
+        self.remark_history_list.setEnabled(enabled)
 
     def _on_side_tab_changed(self, index: int) -> None:
         show_frame = index == 0
