@@ -526,13 +526,11 @@ class TimeSeriesViewer(QWidget):
         indices = list(range(len(channel_names)))
         eeg_index = channel_names.index(PRIMARY_CHANNEL)
         ear_index = channel_names.index(EAR_AVG_CHANNEL)
-        insert_at = min(eeg_index, ear_index)
 
         for idx in sorted({eeg_index, ear_index}, reverse=True):
             indices.pop(idx)
 
-        ordered_pair = [eeg_index, ear_index]
-        indices[insert_at:insert_at] = ordered_pair
+        indices = [ear_index] + indices + [eeg_index]
 
         ordered_data = data[indices]
         ordered_picks = [picks[idx] for idx in indices]
