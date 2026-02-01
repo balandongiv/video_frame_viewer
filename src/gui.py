@@ -263,7 +263,7 @@ class VideoFrameViewer(QMainWindow):
         self.frame_label.setMinimumSize(960, 540)
 
         self.frame_scroll = QScrollArea()
-        self.frame_scroll.setWidgetResizable(True)
+        self.frame_scroll.setWidgetResizable(False)
         self.frame_scroll.setWidget(self.frame_label)
         self.frame_scroll.setAlignment(Qt.AlignCenter)
         self.frame_label.set_scroll_area(self.frame_scroll)
@@ -937,7 +937,6 @@ class VideoFrameViewer(QMainWindow):
 
     def _set_zoom(self, zoom: float, anchor: Optional[QPoint] = None) -> None:
         pixmap = self.frame_label.pixmap()
-        viewport_size = self.frame_scroll.viewport().size()
         h_bar = self.frame_scroll.horizontalScrollBar()
         v_bar = self.frame_scroll.verticalScrollBar()
 
@@ -945,20 +944,20 @@ class VideoFrameViewer(QMainWindow):
             current_width = max(1, pixmap.width())
             current_height = max(1, pixmap.height())
             if anchor is not None:
-                center_x_ratio = (h_bar.value() + anchor.x()) / current_width
-                center_y_ratio = (v_bar.value() + anchor.y()) / current_height
+                anchor_x = anchor.x()
+                anchor_y = anchor.y()
             else:
-                center_x_ratio = (
-                    h_bar.value() + viewport_size.width() / 2
-                ) / current_width
-                center_y_ratio = (
-                    v_bar.value() + viewport_size.height() / 2
-                ) / current_height
+                anchor_x = 0
+                anchor_y = 0
+            center_x_ratio = (h_bar.value() + anchor_x) / current_width
+            center_y_ratio = (v_bar.value() + anchor_y) / current_height
             center_x_ratio = max(0.0, min(1.0, center_x_ratio))
             center_y_ratio = max(0.0, min(1.0, center_y_ratio))
         else:
-            center_x_ratio = 0.5
-            center_y_ratio = 0.5
+            anchor_x = 0
+            anchor_y = 0
+            center_x_ratio = 0.0
+            center_y_ratio = 0.0
 
         clamped_zoom = max(self.MIN_ZOOM, min(zoom, self.MAX_ZOOM))
         self.zoom_factor = clamped_zoom
@@ -972,8 +971,8 @@ class VideoFrameViewer(QMainWindow):
         new_width = max(1, pixmap.width())
         new_height = max(1, pixmap.height())
 
-        target_x = (center_x_ratio * new_width) - (viewport_size.width() / 2)
-        target_y = (center_y_ratio * new_height) - (viewport_size.height() / 2)
+        target_x = (center_x_ratio * new_width) - anchor_x
+        target_y = (center_y_ratio * new_height) - anchor_y
 
         h_bar.setValue(int(max(0, min(target_x, h_bar.maximum()))))
         v_bar.setValue(int(max(0, min(target_y, v_bar.maximum()))))
