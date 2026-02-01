@@ -166,7 +166,7 @@ class VideoFrameViewer(QMainWindow):
         upper_splitter.addWidget(self.side_tabs)
         upper_splitter.addWidget(self.frame_panel)
         upper_splitter.setStretchFactor(0, 1)
-        upper_splitter.setStretchFactor(1, 2)
+        upper_splitter.setStretchFactor(1, 4)
 
         top_layout.addWidget(upper_splitter)
 

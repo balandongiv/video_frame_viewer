@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2025-09-27
+
+### Changed
+- Adjusted the splitter sizing so the frame display takes roughly 80% of the width and discovered videos take 20%.
+
 ## [0.6.0] - 2025-09-27
 
 ### Added
