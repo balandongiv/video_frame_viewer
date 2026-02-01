@@ -189,6 +189,10 @@ class VideoFrameViewer(QMainWindow):
         super().showEvent(event)
         self._apply_upper_splitter_ratio()
 
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._apply_upper_splitter_ratio)
+
     def _apply_upper_splitter_ratio(self) -> None:
         total_width = self.upper_splitter.width()
         if total_width <= 0:
