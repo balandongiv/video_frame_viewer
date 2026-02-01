@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import yaml
-from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
+from PyQt5.QtCore import QEvent, QPoint, QSize, Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -157,18 +157,22 @@ class VideoFrameViewer(QMainWindow):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_container.setLayout(top_layout)
 
-        upper_splitter = QSplitter(Qt.Horizontal)
-        upper_splitter.setChildrenCollapsible(False)
+        self.upper_splitter = QSplitter(Qt.Horizontal)
+        self.upper_splitter.setChildrenCollapsible(False)
 
         self.side_tabs = self._build_side_tabs()
         self.frame_panel = self._build_frame_panel()
 
-        upper_splitter.addWidget(self.side_tabs)
-        upper_splitter.addWidget(self.frame_panel)
-        upper_splitter.setStretchFactor(0, 1)
-        upper_splitter.setStretchFactor(1, 2)
+        self.side_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.side_tabs.setMinimumWidth(200)
+        self.frame_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        top_layout.addWidget(upper_splitter)
+        self.upper_splitter.addWidget(self.side_tabs)
+        self.upper_splitter.addWidget(self.frame_panel)
+        self.upper_splitter.setStretchFactor(0, 1)
+        self.upper_splitter.setStretchFactor(1, 4)
+
+        top_layout.addWidget(self.upper_splitter)
 
         self.time_series_group = self._build_time_series_panel()
 
@@ -183,6 +187,25 @@ class VideoFrameViewer(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.side_tabs.currentChanged.connect(self._on_side_tab_changed)
         self._on_side_tab_changed(self.side_tabs.currentIndex())
+        QTimer.singleShot(0, self._apply_upper_splitter_ratio)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_upper_splitter_ratio()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._apply_upper_splitter_ratio)
+
+    def _apply_upper_splitter_ratio(self) -> None:
+        total_width = self.upper_splitter.width()
+        if total_width <= 0:
+            total_width = self.width()
+        if total_width <= 0:
+            total_width = 1
+        side_width = max(1, int(total_width * 0.2))
+        frame_width = max(1, total_width - side_width)
+        self.upper_splitter.setSizes([side_width, frame_width])
 
     def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
         directory_group = QGroupBox("Dataset Directory")

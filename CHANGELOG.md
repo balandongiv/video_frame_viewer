@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.3] - 2025-09-27
+
+### Fixed
+- Allowed the side tabs to shrink so the 80/20 splitter sizing can take effect.
+
+## [0.7.2] - 2025-09-27
+
+### Fixed
+- Reapply the 80/20 upper splitter sizing on window resizes to keep the frame display dominant.
+
+## [0.7.1] - 2025-09-27
+
+### Fixed
+- Enforced the 80/20 width split between the frame display and discovered videos list on initial load.
+
+## [0.7.0] - 2025-09-27
+
+### Changed
+- Adjusted the splitter sizing so the frame display takes roughly 80% of the width and discovered videos take 20%.
+
 ## [0.6.0] - 2025-09-27
 
 ### Added
