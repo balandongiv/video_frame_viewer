@@ -4,9 +4,6 @@ from typing import List, Optional
 
 import yaml
 from PyQt5.QtCore import QEvent, QPoint, QSize, Qt
-
-SESSION_FILENAME = "VideoFrameViewers.yaml"
-
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -28,20 +25,28 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from config import AppConfig
+from paths import derive_annotation_path, derive_time_series_path
 from time_series import TimeSeriesViewer
 from utils import (
+    extract_subject_label,
     find_md_mff_videos,
     find_mov_videos,
     frame_to_pixmap,
     seconds_to_frame_index,
+    subject_sort_key,
 )
 from video_handler import VideoHandler
+
+SESSION_FILENAME = "VideoFrameViewers.yaml"
 
 
 class PannableLabel(QLabel):
@@ -118,6 +123,7 @@ class VideoFrameViewer(QMainWindow):
         self.zoom_factor: float = 1.0
         self.last_frame = None
         self.status_value: str = "Pending"
+        self.summary_subject_counts: dict[str, dict[str, int]] = {}
         self.time_series_viewer = TimeSeriesViewer(
             time_series_root=self.config.time_series_root,
             annotation_root=self.config.annotation_root,
@@ -154,20 +160,20 @@ class VideoFrameViewer(QMainWindow):
         upper_splitter = QSplitter(Qt.Horizontal)
         upper_splitter.setChildrenCollapsible(False)
 
-        side_tabs = self._build_side_tabs()
-        frame_panel = self._build_frame_panel()
+        self.side_tabs = self._build_side_tabs()
+        self.frame_panel = self._build_frame_panel()
 
-        upper_splitter.addWidget(side_tabs)
-        upper_splitter.addWidget(frame_panel)
+        upper_splitter.addWidget(self.side_tabs)
+        upper_splitter.addWidget(self.frame_panel)
         upper_splitter.setStretchFactor(0, 1)
-        upper_splitter.setStretchFactor(1, 5)
+        upper_splitter.setStretchFactor(1, 2)
 
         top_layout.addWidget(upper_splitter)
 
-        time_series_group = self._build_time_series_panel()
+        self.time_series_group = self._build_time_series_panel()
 
         self._main_splitter.addWidget(top_container)
-        self._main_splitter.addWidget(time_series_group)
+        self._main_splitter.addWidget(self.time_series_group)
         self._main_splitter.setStretchFactor(0, 5)
         self._main_splitter.setStretchFactor(1, 1)
 
@@ -175,6 +181,8 @@ class VideoFrameViewer(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        self.side_tabs.currentChanged.connect(self._on_side_tab_changed)
+        self._on_side_tab_changed(self.side_tabs.currentIndex())
 
     def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
         directory_group = QGroupBox("Dataset Directory")
@@ -333,10 +341,46 @@ class VideoFrameViewer(QMainWindow):
         self.summary_fif_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary_csv_label = QLabel("CSV: (not loaded)")
         self.summary_csv_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_overall_label = QLabel("Dataset summary: (scan dataset to populate)")
+        self.summary_overall_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_overall_label.setWordWrap(True)
+
+        self.summary_table = QTableWidget(0, 7)
+        self.summary_table.setHorizontalHeaderLabels(
+            [
+                "Subject",
+                "Pending",
+                "Ongoing",
+                "Complete",
+                "Issue",
+                "Missing CSV",
+                "Missing FIF",
+            ]
+        )
+        self.summary_table.horizontalHeader().setStretchLastSection(True)
+        self.summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.summary_table.setSelectionMode(QTableWidget.NoSelection)
+
+        remark_group = QGroupBox("Remarks")
+        remark_layout = QVBoxLayout()
+        remark_group.setLayout(remark_layout)
+        self.remark_input = QTextEdit()
+        self.remark_input.setPlaceholderText("Enter remarks for this video session...")
+        self.remark_input.setMinimumHeight(80)
+        remark_buttons = QHBoxLayout()
+        self.remark_save_button = QPushButton("Save Remark")
+        self.remark_save_button.clicked.connect(self._save_remark)
+        remark_buttons.addStretch()
+        remark_buttons.addWidget(self.remark_save_button)
+        remark_layout.addWidget(self.remark_input)
+        remark_layout.addLayout(remark_buttons)
 
         layout.addWidget(self.summary_video_label)
         layout.addWidget(self.summary_fif_label)
         layout.addWidget(self.summary_csv_label)
+        layout.addWidget(self.summary_overall_label)
+        layout.addWidget(self.summary_table)
+        layout.addWidget(remark_group)
         layout.addStretch()
         summary_tab.setLayout(layout)
         return summary_tab
@@ -521,8 +565,10 @@ class VideoFrameViewer(QMainWindow):
             self.video_paths = find_md_mff_videos(video_root)
 
         self.video_list.clear()
-        for video_path in sorted(self.video_paths):
-            item = QListWidgetItem(str(video_path))
+        for video_path in sorted(self.video_paths, key=subject_sort_key):
+            subject = extract_subject_label(video_path) or "Unknown"
+            item = QListWidgetItem(f"{subject} | {video_path.name}")
+            item.setData(Qt.UserRole, str(video_path))
             self.video_list.addItem(item)
 
         if self.video_paths:
@@ -533,6 +579,7 @@ class VideoFrameViewer(QMainWindow):
         else:
             descriptor = "test .mov" if self.use_test_data else "MD.mff .mov"
             self._set_status(f"No {descriptor} files found in the dataset root.")
+        self._refresh_dataset_summary()
         self._update_summary(None, None, None, None, None)
 
     def _load_selected_video(self) -> None:
@@ -542,7 +589,8 @@ class VideoFrameViewer(QMainWindow):
 
         self._save_session_state()
 
-        video_path = Path(selected_items[0].text())
+        stored_path = selected_items[0].data(Qt.UserRole)
+        video_path = Path(stored_path or selected_items[0].text())
         if not self.video_handler.load(video_path):
             self._set_status("Unable to open the selected video.")
             self._update_navigation_state(False)
@@ -576,13 +624,15 @@ class VideoFrameViewer(QMainWindow):
         data = {
             "shift_frame": self.shift_value,
             "stop_position": self.current_frame_index,
-            "status": self.status_value
+            "status": self.status_value,
+            "remark": self.remark_input.toPlainText().strip(),
         }
         try:
             with session_path.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(data, f)
         except Exception as e:
             self._set_status(f"Failed to save session state: {e}")
+        self._refresh_dataset_summary()
 
     def _load_session_state(self) -> None:
         _, loaded_csv = self.time_series_viewer.last_loaded_paths()
@@ -595,6 +645,7 @@ class VideoFrameViewer(QMainWindow):
             self.shift_input.setText("0")
             self._apply_shift()
             self.status_dropdown.setCurrentText("Pending")
+            self.remark_input.setPlainText("")
             return
 
         try:
@@ -604,12 +655,14 @@ class VideoFrameViewer(QMainWindow):
             shift = data.get("shift_frame", 0)
             stop_pos = data.get("stop_position", 0)
             status = data.get("status", "Pending")
+            remark = data.get("remark", "")
 
             self.shift_input.setText(str(shift))
             self._apply_shift()
 
             self.status_dropdown.setCurrentText(status)
             self.status_value = status
+            self.remark_input.setPlainText(str(remark))
 
             if stop_pos > 0:
                 self._goto_frame(stop_pos, show_status=False)
@@ -622,6 +675,13 @@ class VideoFrameViewer(QMainWindow):
     def _on_status_changed(self, text: str) -> None:
         self.status_value = text
         self._save_session_state()
+
+    def _save_remark(self) -> None:
+        if not self.video_handler.capture:
+            self._set_status("Load a video before saving remarks.")
+            return
+        self._save_session_state()
+        self._set_status("Remark saved.")
 
     # Shift and navigation logic
     def _apply_shift(self) -> None:
@@ -838,6 +898,13 @@ class VideoFrameViewer(QMainWindow):
             self.time_search_button,
         ]:
             button.setEnabled(enabled)
+        self.remark_input.setEnabled(enabled)
+        self.remark_save_button.setEnabled(enabled)
+
+    def _on_side_tab_changed(self, index: int) -> None:
+        show_frame = index == 0
+        self.frame_panel.setVisible(show_frame)
+        self.time_series_group.setVisible(show_frame)
 
     def _adjust_zoom(self, delta: float, anchor: Optional[QPoint] = None) -> None:
         self._set_zoom(self.zoom_factor + delta, anchor)
@@ -922,6 +989,7 @@ class VideoFrameViewer(QMainWindow):
         self.summary_csv_label.setText(
             self._format_summary_line("CSV", expected_csv, loaded_csv is not None)
         )
+        self._update_summary_table()
 
     def _format_summary_line(self, label: str, path: Optional[Path], loaded: bool) -> str:
         if path is None:
@@ -931,6 +999,125 @@ class VideoFrameViewer(QMainWindow):
         exists = "found" if path.exists() else "missing"
         state = "loaded" if loaded else "expected"
         return f"{label}: {path} [{state}, {exists}]"
+
+    def _refresh_dataset_summary(self) -> None:
+        self.summary_subject_counts = {}
+        if not self.video_paths:
+            self.summary_overall_label.setText("Dataset summary: (no videos found)")
+            self._update_summary_table()
+            return
+
+        for video_path in self.video_paths:
+            subject = extract_subject_label(video_path) or "Unknown"
+            subject_counts = self.summary_subject_counts.setdefault(
+                subject,
+                {
+                    "Pending": 0,
+                    "Ongoing": 0,
+                    "Complete": 0,
+                    "Issue": 0,
+                    "Missing CSV": 0,
+                    "Missing FIF": 0,
+                },
+            )
+            status = self._status_for_video(video_path)
+            subject_counts[status] += 1
+            subject_counts["Missing CSV"] += int(self._missing_csv(video_path))
+            subject_counts["Missing FIF"] += int(self._missing_fif(video_path))
+
+        totals = {
+            "Pending": 0,
+            "Ongoing": 0,
+            "Complete": 0,
+            "Issue": 0,
+            "Missing CSV": 0,
+            "Missing FIF": 0,
+        }
+        for counts in self.summary_subject_counts.values():
+            for key in totals:
+                totals[key] += counts.get(key, 0)
+
+        total_videos = sum(totals.values())
+        self.summary_overall_label.setText(
+            "Dataset summary: "
+            f"{total_videos} video(s) | "
+            f"Pending: {totals['Pending']}, "
+            f"Ongoing: {totals['Ongoing']}, "
+            f"Complete: {totals['Complete']}, "
+            f"Issue: {totals['Issue']} | "
+            f"Missing CSV: {totals['Missing CSV']}, "
+            f"Missing FIF: {totals['Missing FIF']}"
+        )
+        self._update_summary_table()
+
+    def _status_for_video(self, video_path: Path) -> str:
+        try:
+            csv_path = derive_annotation_path(
+                video_path,
+                processed_root=self.time_series_viewer.time_series_root,
+                csv_root=self.time_series_viewer.annotation_root,
+            )
+        except ValueError:
+            return "Pending"
+
+        session_path = csv_path.parent / SESSION_FILENAME
+        if not session_path.exists():
+            return "Pending"
+
+        try:
+            with session_path.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            return "Pending"
+
+        status = data.get("status", "Pending")
+        if status not in {"Pending", "Ongoing", "Complete", "Issue"}:
+            return "Pending"
+        return status
+
+    def _update_summary_table(self) -> None:
+        subjects = sorted(
+            self.summary_subject_counts.keys(),
+            key=lambda item: (item == "Unknown", item),
+        )
+        self.summary_table.setRowCount(len(subjects))
+
+        for row, subject in enumerate(subjects):
+            counts = self.summary_subject_counts.get(subject, {})
+            values = [
+                subject,
+                str(counts.get("Pending", 0)),
+                str(counts.get("Ongoing", 0)),
+                str(counts.get("Complete", 0)),
+                str(counts.get("Issue", 0)),
+                str(counts.get("Missing CSV", 0)),
+                str(counts.get("Missing FIF", 0)),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.summary_table.setItem(row, col, item)
+
+    def _missing_csv(self, video_path: Path) -> bool:
+        try:
+            csv_path = derive_annotation_path(
+                video_path,
+                processed_root=self.time_series_viewer.time_series_root,
+                csv_root=self.time_series_viewer.annotation_root,
+            )
+        except ValueError:
+            return True
+        return not csv_path.exists()
+
+    def _missing_fif(self, video_path: Path) -> bool:
+        try:
+            ts_path = derive_time_series_path(
+                video_path,
+                processed_root=self.time_series_viewer.time_series_root,
+            )
+        except ValueError:
+            return True
+        return not ts_path.exists()
 
     def _setup_shortcuts(self) -> None:
         left_shortcut = QShortcut(QKeySequence(Qt.Key_Left), self)
