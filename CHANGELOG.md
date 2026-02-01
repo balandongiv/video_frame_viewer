@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2025-09-27
+
+### Fixed
+- Enforced the 80/20 width split between the frame display and discovered videos list on initial load.
+
 ## [0.7.0] - 2025-09-27
 
 ### Changed
