@@ -160,20 +160,20 @@ class VideoFrameViewer(QMainWindow):
         upper_splitter = QSplitter(Qt.Horizontal)
         upper_splitter.setChildrenCollapsible(False)
 
-        side_tabs = self._build_side_tabs()
-        frame_panel = self._build_frame_panel()
+        self.side_tabs = self._build_side_tabs()
+        self.frame_panel = self._build_frame_panel()
 
-        upper_splitter.addWidget(side_tabs)
-        upper_splitter.addWidget(frame_panel)
+        upper_splitter.addWidget(self.side_tabs)
+        upper_splitter.addWidget(self.frame_panel)
         upper_splitter.setStretchFactor(0, 1)
-        upper_splitter.setStretchFactor(1, 5)
+        upper_splitter.setStretchFactor(1, 2)
 
         top_layout.addWidget(upper_splitter)
 
-        time_series_group = self._build_time_series_panel()
+        self.time_series_group = self._build_time_series_panel()
 
         self._main_splitter.addWidget(top_container)
-        self._main_splitter.addWidget(time_series_group)
+        self._main_splitter.addWidget(self.time_series_group)
         self._main_splitter.setStretchFactor(0, 5)
         self._main_splitter.setStretchFactor(1, 1)
 
@@ -181,6 +181,8 @@ class VideoFrameViewer(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        self.side_tabs.currentChanged.connect(self._on_side_tab_changed)
+        self._on_side_tab_changed(self.side_tabs.currentIndex())
 
     def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
         directory_group = QGroupBox("Dataset Directory")
@@ -564,7 +566,9 @@ class VideoFrameViewer(QMainWindow):
 
         self.video_list.clear()
         for video_path in sorted(self.video_paths, key=subject_sort_key):
-            item = QListWidgetItem(str(video_path))
+            subject = extract_subject_label(video_path) or "Unknown"
+            item = QListWidgetItem(f"{subject} | {video_path.name}")
+            item.setData(Qt.UserRole, str(video_path))
             self.video_list.addItem(item)
 
         if self.video_paths:
@@ -585,7 +589,8 @@ class VideoFrameViewer(QMainWindow):
 
         self._save_session_state()
 
-        video_path = Path(selected_items[0].text())
+        stored_path = selected_items[0].data(Qt.UserRole)
+        video_path = Path(stored_path or selected_items[0].text())
         if not self.video_handler.load(video_path):
             self._set_status("Unable to open the selected video.")
             self._update_navigation_state(False)
@@ -895,6 +900,11 @@ class VideoFrameViewer(QMainWindow):
             button.setEnabled(enabled)
         self.remark_input.setEnabled(enabled)
         self.remark_save_button.setEnabled(enabled)
+
+    def _on_side_tab_changed(self, index: int) -> None:
+        show_frame = index == 0
+        self.frame_panel.setVisible(show_frame)
+        self.time_series_group.setVisible(show_frame)
 
     def _adjust_zoom(self, delta: float, anchor: Optional[QPoint] = None) -> None:
         self._set_zoom(self.zoom_factor + delta, anchor)

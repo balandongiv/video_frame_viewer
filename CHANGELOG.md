@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2025-09-27
+
+### Added
+- Hide the frame/time series views when Channels, Navigation, or Summary tabs are active.
+- Display discovered videos as subject ID plus filename instead of full paths.
+
 ## [0.5.0] - 2025-09-27
 
 ### Added
