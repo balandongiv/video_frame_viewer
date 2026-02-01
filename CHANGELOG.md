@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.3] - 2025-09-27
+
+### Fixed
+- Allowed the side tabs to shrink so the 80/20 splitter sizing can take effect.
+
 ## [0.7.2] - 2025-09-27
 
 ### Fixed

@@ -163,6 +163,10 @@ class VideoFrameViewer(QMainWindow):
         self.side_tabs = self._build_side_tabs()
         self.frame_panel = self._build_frame_panel()
 
+        self.side_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.side_tabs.setMinimumWidth(200)
+        self.frame_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         self.upper_splitter.addWidget(self.side_tabs)
         self.upper_splitter.addWidget(self.frame_panel)
         self.upper_splitter.setStretchFactor(0, 1)
