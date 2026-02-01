@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-02-01
+
+### Changed
+- Display EAR-avg_ear at the top of the time series stack and EEG-E8 at the bottom.
+
 ## [0.10.0] - 2025-09-27
 
 ### Added
