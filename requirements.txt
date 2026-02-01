@@ -2,6 +2,6 @@ PyQt5>=5.15.10,<5.16
 opencv-python-headless>=4.9.0,<4.11.0
 numpy>=1.23,<2.1
 pyqtgraph>=0.13,<0.14
-mne>=1.6,<1.7
+mne>=1.11.0
 platformdirs>=4.2,<5.0
 PyYAML>=6.0,<7.0
