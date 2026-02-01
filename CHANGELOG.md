@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2025-09-27
+
+### Added
+- Add Ctrl+Shift+Left/Right shortcuts to jump 30 frames and document jump shortcuts in navigation settings.
+
 ## [0.9.0] - 2025-09-27
 
 ### Added
