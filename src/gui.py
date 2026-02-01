@@ -98,6 +98,7 @@ class VideoFrameViewer(QMainWindow):
     TEST_PROCESSED_ROOT = PROJECT_ROOT / "test_data" / "drowsy_driving_raja_processed"
     SINGLE_STEP = 1
     JUMP_STEP = 10
+    LARGE_STEP = 30
     TIME_BASE_FPS = 30
     MIN_ZOOM = 0.25
     MAX_ZOOM = 10.0
@@ -343,10 +344,21 @@ class VideoFrameViewer(QMainWindow):
         self.right_jump_input.setValue(self.right_jump_size)
         self.right_jump_input.valueChanged.connect(self._update_right_jump_size)
 
-        jump_layout.addWidget(QLabel("Left Jump (frames):"), 0, 0)
-        jump_layout.addWidget(self.left_jump_input, 0, 1)
-        jump_layout.addWidget(QLabel("Right Jump (frames):"), 1, 0)
-        jump_layout.addWidget(self.right_jump_input, 1, 1)
+        jump_layout.addWidget(QLabel("Setting"), 0, 0)
+        jump_layout.addWidget(QLabel("Frames"), 0, 1)
+        jump_layout.addWidget(QLabel("Shortcut"), 0, 2)
+
+        jump_layout.addWidget(QLabel("Left Jump (frames):"), 1, 0)
+        jump_layout.addWidget(self.left_jump_input, 1, 1)
+        jump_layout.addWidget(QLabel("←"), 1, 2)
+
+        jump_layout.addWidget(QLabel("Right Jump (frames):"), 2, 0)
+        jump_layout.addWidget(self.right_jump_input, 2, 1)
+        jump_layout.addWidget(QLabel("→"), 2, 2)
+
+        jump_layout.addWidget(QLabel("Quick Step (frames):"), 3, 0)
+        jump_layout.addWidget(QLabel(str(self.LARGE_STEP)), 3, 1)
+        jump_layout.addWidget(QLabel("Ctrl+Shift+←/→"), 3, 2)
 
         layout.addWidget(jump_group)
         layout.addStretch()
@@ -885,6 +897,12 @@ class VideoFrameViewer(QMainWindow):
     def _trigger_right_step(self) -> None:
         self._step_frames(self.SINGLE_STEP)
 
+    def _trigger_left_large_step(self) -> None:
+        self._step_frames(-self.LARGE_STEP)
+
+    def _trigger_right_large_step(self) -> None:
+        self._step_frames(self.LARGE_STEP)
+
     def _trigger_left_jump(self) -> None:
         self._step_frames(-self.left_jump_size)
 
@@ -1238,6 +1256,18 @@ class VideoFrameViewer(QMainWindow):
         right_step_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         right_step_shortcut.activated.connect(self._trigger_right_step)
 
+        left_large_step_shortcut = QShortcut(
+            QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Left), self
+        )
+        left_large_step_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        left_large_step_shortcut.activated.connect(self._trigger_left_large_step)
+
+        right_large_step_shortcut = QShortcut(
+            QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Right), self
+        )
+        right_large_step_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        right_large_step_shortcut.activated.connect(self._trigger_right_large_step)
+
         next_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_BracketRight), self)
         next_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         next_annotation_shortcut.activated.connect(self._handle_next_annotation_shortcut)
@@ -1268,6 +1298,8 @@ class VideoFrameViewer(QMainWindow):
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
         self.right_step_shortcut = right_step_shortcut
+        self.left_large_step_shortcut = left_large_step_shortcut
+        self.right_large_step_shortcut = right_large_step_shortcut
         self.next_annotation_shortcut = next_annotation_shortcut
         self.previous_annotation_shortcut = previous_annotation_shortcut
         self.next_annotation_letter = next_annotation_letter
