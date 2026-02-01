@@ -743,7 +743,12 @@ class VideoFrameViewer(QMainWindow):
                 data = {}
         remarks = self._extract_remarks(data)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        remarks.append(f"{timestamp} — {remark_text}")
+        session_seconds = self._current_time_seconds()
+        remark_entry = (
+            f"{timestamp} — Frame {self.current_frame_index} "
+            f"({session_seconds:.2f}s) — {remark_text}"
+        )
+        remarks.append(remark_entry)
         data.update(
             {
                 "shift_frame": self.shift_value,
@@ -939,11 +944,15 @@ class VideoFrameViewer(QMainWindow):
             seconds_info = self._seconds_info_text()
             shift_info = f"Shift: {self.shift_value:+d} frame(s)"
             sync_info = f"Sync offset: {self.sync_offset_seconds:+.3f}s"
+            total_frames = max(1, self.video_handler.frame_count - 1)
+            percent = (self.current_frame_index / total_frames) * 100
+            percent_info = f"[ {percent:.2f}% ]"
             self.frame_info_label.setText(
-                f"Frame {info}\n{seconds_info}\n{shift_info} | {sync_info}"
+                f"Frame {info} {percent_info}\n{seconds_info}\n{shift_info} | {sync_info}"
             )
             self.current_frame_label.setText(
-                f"Current frame: {info} | {seconds_info} | {shift_info} | {sync_info}"
+                "Current frame: "
+                f"{info} {percent_info} | {seconds_info} | {shift_info} | {sync_info}"
             )
         else:
             self.frame_info_label.setText("Frame: -")
