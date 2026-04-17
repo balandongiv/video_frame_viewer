@@ -1251,9 +1251,11 @@ class TimeSeriesViewer(QWidget):
             reader = csv.reader(handle)
             return sum(1 for _ in reader)
 
+    def _remove_annotation_from_model(self, annotation: Annotation) -> None:
+        self._annotations = [item for item in self._annotations if item is not annotation]
+
     def _delete_annotation(self, annotation_item: AnnotationItem) -> None:
-        if annotation_item.annotation in self._annotations:
-            self._annotations.remove(annotation_item.annotation)
+        self._remove_annotation_from_model(annotation_item.annotation)
         self._annotation_by_region.pop(annotation_item.region, None)
         self.plot_widget.removeItem(annotation_item.region)
         self._annotation_items_by_widget[self.plot_widget] = [
@@ -1273,6 +1275,75 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText("Annotation deleted.")
         if self._selected_annotation == annotation_item.annotation:
             self._selected_annotation = None
+
+    def _remove_annotation_regions(self, annotation: Annotation) -> None:
+        for widget, items in self._annotation_items_by_widget.items():
+            for item in list(items):
+                if item.annotation is not annotation:
+                    continue
+                self._annotation_by_region.pop(item.region, None)
+                widget.removeItem(item.region)
+                items.remove(item)
+
+    def _overlapping_annotations(
+        self, onset: float, duration: float, description: str
+    ) -> List[Annotation]:
+        end = onset + duration
+        return [
+            annotation
+            for annotation in self._annotations
+            if annotation.description == description
+            and onset < annotation.onset + annotation.duration
+            and annotation.onset < end
+        ]
+
+    def _merge_annotation(self, onset: float, duration: float, description: str) -> Annotation:
+        merged_start = onset
+        merged_end = onset + duration
+        overlaps: List[Annotation] = []
+
+        while True:
+            next_overlaps = [
+                annotation
+                for annotation in self._overlapping_annotations(
+                    merged_start,
+                    merged_end - merged_start,
+                    description,
+                )
+                if all(annotation is not existing for existing in overlaps)
+            ]
+            if not next_overlaps:
+                break
+            overlaps.extend(next_overlaps)
+            merged_start = min(
+                [merged_start] + [annotation.onset for annotation in next_overlaps]
+            )
+            merged_end = max(
+                [merged_end]
+                + [annotation.onset + annotation.duration for annotation in next_overlaps]
+            )
+
+        if not overlaps:
+            annotation = Annotation(onset=onset, duration=duration, description=description)
+            self._annotations.append(annotation)
+            self._render_annotation(annotation)
+            self.status_label.setText("Annotation added.")
+            return annotation
+
+        merged_annotation = overlaps[0]
+        for annotation in overlaps[1:]:
+            self._remove_annotation_from_model(annotation)
+            self._remove_annotation_regions(annotation)
+
+        merged_annotation.onset = merged_start
+        merged_annotation.duration = merged_end - merged_start
+        self._sync_annotation_regions(
+            merged_annotation,
+            merged_annotation.onset,
+            merged_annotation.duration,
+        )
+        self.status_label.setText("Annotation merged with existing label.")
+        return merged_annotation
 
     def _start_annotation_drag(self, pos) -> None:
         time_value = self._time_at_position(pos)
@@ -1334,13 +1405,10 @@ class TimeSeriesViewer(QWidget):
 
         description = self._prompt_for_description()
         if description:
-            annotation = Annotation(onset=onset, duration=duration, description=description)
-            self._annotations.append(annotation)
-            self._render_annotation(annotation)
+            annotation = self._merge_annotation(onset, duration, description)
             self._set_selected_annotation(annotation, announce=False)
             self._set_annotations_dirty(True)
             self._update_annotation_filter_options()
-            self.status_label.setText("Annotation added.")
 
         self._reset_annotation_drag()
 

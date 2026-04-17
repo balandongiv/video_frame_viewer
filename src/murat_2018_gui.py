@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import yaml
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -72,6 +72,9 @@ class Murat2018Viewer(QMainWindow):
     """Standalone EDF review UI for the Murat 2018 dataset."""
 
     DEFAULT_STEP_SECONDS = 1.0
+    RECORDINGS_PANEL_WIDTH = 280
+    RECORDINGS_PANEL_MAX_WIDTH = 320
+    DETACHED_PANEL_MAX_WIDTH = 16777215
 
     def __init__(self, dataset_root: Path = DEFAULT_MURAT_ROOT) -> None:
         super().__init__()
@@ -104,12 +107,13 @@ class Murat2018Viewer(QMainWindow):
 
         self.main_splitter.addWidget(self.side_tabs)
         self.main_splitter.addWidget(self.time_series_viewer)
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 4)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
         main_layout.addWidget(self.main_splitter)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        QTimer.singleShot(0, self._apply_side_tab_mode)
 
     def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
         directory_group = QGroupBox("Murat 2018 Dataset Directory")
@@ -157,7 +161,21 @@ class Murat2018Viewer(QMainWindow):
         tabs.addTab(recordings_tab, "Recordings")
         tabs.addTab(channels_tab, "Channels")
         tabs.addTab(summary_tab, "Summary")
+        tabs.currentChanged.connect(self._apply_side_tab_mode)
         return tabs
+
+    def _apply_side_tab_mode(self, *_: object) -> None:
+        if self.side_tabs.currentIndex() == 0:
+            self.time_series_viewer.show()
+            self.side_tabs.setMaximumWidth(self.RECORDINGS_PANEL_MAX_WIDTH)
+            available_width = max(1, self.main_splitter.width())
+            side_width = min(self.RECORDINGS_PANEL_WIDTH, max(220, available_width // 4))
+            self.main_splitter.setSizes([side_width, max(1, available_width - side_width)])
+            return
+
+        self.side_tabs.setMaximumWidth(self.DETACHED_PANEL_MAX_WIDTH)
+        self.time_series_viewer.hide()
+        self.main_splitter.setSizes([max(1, self.main_splitter.width()), 0])
 
     def _build_recording_list_panel(self) -> QWidget:
         container = QWidget()
