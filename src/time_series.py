@@ -115,6 +115,7 @@ class TimeSeriesViewer(QWidget):
         self._last_annotation_path: Optional[Path] = None
         self._expected_ts_path: Optional[Path] = None
         self._expected_annotation_path: Optional[Path] = None
+        self._direct_annotation_path: Optional[Path] = None
         self.time_series_root: Path = time_series_root or Path.cwd()
         self.annotation_root: Path = annotation_root or self.time_series_root
         self._annotation_by_region: dict[pg.LinearRegionItem, AnnotationItem] = {}
@@ -311,25 +312,20 @@ class TimeSeriesViewer(QWidget):
 
         return self._last_ts_path, self._last_annotation_path
 
+    def current_cursor_time(self) -> float:
+        """Return the currently centered cursor time in seconds."""
+
+        return self._last_cursor_time
+
+    def seek_time(self, seconds: float) -> None:
+        """Move the time-series view to the requested time in seconds."""
+
+        self.update_cursor_time(seconds)
+
     def load_for_video(self, video_path: Optional[Path]) -> None:
         """Load and plot the time series associated with the provided video."""
 
-        self._clear_plot()
-        self._clear_annotations()
-        self._times = None
-        self.raw = None
-        self._selected_channels.clear()
-        self.channel_list.clear()
-        self._reset_zoom()
-        self._last_ts_path = None
-        self._last_video_path = None
-        self._last_annotation_path = None
-        self._expected_ts_path = None
-        self._expected_annotation_path = None
-        self._annotations = []
-        self._set_annotations_dirty(False)
-        self._update_annotation_filter_options(force_all=True)
-        self._selected_annotation = None
+        self._reset_loaded_data()
 
         if video_path is None:
             self.status_label.setText("Select a video to view its time series.")
@@ -346,7 +342,50 @@ class TimeSeriesViewer(QWidget):
         csv_path = derive_annotation_path(
             video_path, processed_root=self.time_series_root, csv_root=self.annotation_root
         )
+        self._load_time_series_paths(ts_path, csv_path, source_video=video_path)
+
+    def load_time_series_file(
+        self, time_series_path: Optional[Path], annotation_path: Optional[Path] = None
+    ) -> None:
+        """Load a standalone EDF/FIF time series with an explicit CSV annotation path."""
+
+        self._reset_loaded_data()
+        if time_series_path is None:
+            self.status_label.setText("Select a recording to view its time series.")
+            self.cursor_line.hide()
+            return
+
+        csv_path = annotation_path or time_series_path.with_suffix(".csv")
+        self._load_time_series_paths(time_series_path, csv_path)
+
+    def _reset_loaded_data(self) -> None:
+        self._clear_plot()
+        self._clear_annotations()
+        self._times = None
+        self.raw = None
+        self._selected_channels.clear()
+        self.channel_list.clear()
+        self._reset_zoom()
+        self._last_ts_path = None
+        self._last_video_path = None
+        self._last_annotation_path = None
+        self._expected_ts_path = None
+        self._expected_annotation_path = None
+        self._direct_annotation_path = None
+        self._annotations = []
+        self._set_annotations_dirty(False)
+        self._update_annotation_filter_options(force_all=True)
+        self._selected_annotation = None
+
+    def _load_time_series_paths(
+        self,
+        ts_path: Path,
+        csv_path: Path,
+        source_video: Optional[Path] = None,
+    ) -> None:
+        self._expected_ts_path = ts_path
         self._expected_annotation_path = csv_path
+        self._direct_annotation_path = csv_path if source_video is None else None
         if not ts_path.exists():
             self.status_label.setText(
                 f"Time series file not found at {ts_path}. "
@@ -355,16 +394,31 @@ class TimeSeriesViewer(QWidget):
             self.cursor_line.hide()
             return
 
-        self.status_label.setText(f"Loaded time series from {ts_path}.")
+        self.status_label.setText(f"Loading time series from {ts_path}...")
         self._last_ts_path = ts_path
-        self._last_video_path = video_path
+        self._last_video_path = source_video
         self._last_annotation_path = csv_path
-        self.raw = mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
+        try:
+            self.raw = self._read_raw_time_series(ts_path)
+        except Exception as exc:
+            self.raw = None
+            self._last_ts_path = None
+            self.status_label.setText(f"Failed to load time series from {ts_path}: {exc}")
+            self.cursor_line.hide()
+            return
         self._times = self.raw.times
         self._populate_channel_list()
         self._plot_data()
         self._add_annotations_for_path(csv_path)
         self._ensure_view_range(0.0)
+
+    def _read_raw_time_series(self, ts_path: Path) -> mne.io.BaseRaw:
+        suffix = ts_path.suffix.lower()
+        if suffix == ".fif":
+            return mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
+        if suffix == ".edf":
+            return mne.io.read_raw_edf(str(ts_path), preload=True, verbose="ERROR")
+        raise ValueError(f"Unsupported time series format: {ts_path.suffix}")
 
     def update_cursor_time(self, seconds: float) -> None:
         """Keep the current time centered under a fixed cursor."""
@@ -941,6 +995,8 @@ class TimeSeriesViewer(QWidget):
         self.save_annotations_button.setEnabled(dirty and self._annotation_csv_path() is not None)
 
     def _annotation_csv_path(self) -> Optional[Path]:
+        if self._direct_annotation_path is not None:
+            return self._direct_annotation_path
         if self._last_video_path is not None:
             try:
                 return derive_annotation_path(
