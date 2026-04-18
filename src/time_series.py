@@ -328,6 +328,11 @@ class TimeSeriesViewer(QWidget):
 
         return self._last_ts_path, self._last_annotation_path
 
+    def has_unsaved_annotation_changes(self) -> bool:
+        """Return whether annotations have unsaved in-memory edits."""
+
+        return self._annotations_dirty
+
     def current_cursor_time(self) -> float:
         """Return the currently centered cursor time in seconds."""
 
@@ -380,6 +385,32 @@ class TimeSeriesViewer(QWidget):
 
         csv_path = annotation_path or time_series_path.with_suffix(".csv")
         self._load_time_series_paths(time_series_path, csv_path)
+
+    def load_annotation_file(self, annotation_path: Path) -> bool:
+        """Replace annotations for the current signal with an explicit CSV file."""
+
+        if self.raw is None or self._times is None or self._times.size == 0:
+            self.status_label.setText("Load a time series before choosing a CSV file.")
+            return False
+
+        if annotation_path.suffix.lower() != ".csv":
+            self.status_label.setText(f"Annotation file must be a CSV: {annotation_path}")
+            return False
+
+        if not annotation_path.exists():
+            self.status_label.setText(f"Annotation CSV not found at {annotation_path}.")
+            return False
+
+        self._clear_annotations()
+        self._annotations = []
+        self._last_annotation_path = annotation_path
+        self._direct_annotation_path = annotation_path
+        self._update_annotation_filter_options(force_all=True)
+        self._add_annotations_for_path(annotation_path)
+        self._set_annotations_dirty(False)
+        self._ensure_view_range(self._last_cursor_time)
+        self.status_label.setText(f"Loaded annotations from {annotation_path}.")
+        return True
 
     def _reset_loaded_data(self) -> None:
         self._clear_plot()

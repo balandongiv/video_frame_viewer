@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QShortcut,
@@ -550,6 +551,9 @@ class VideoFrameViewer(QMainWindow):
         apply_sync_offset_button = QPushButton("Apply Sync Offset")
         apply_sync_offset_button.clicked.connect(self._apply_sync_offset)
 
+        self.csv_picker_button = QPushButton("Pick CSV")
+        self.csv_picker_button.clicked.connect(self._browse_annotation_csv)
+
         control_layout.addWidget(QLabel("Frame Number:"), 0, 0)
         control_layout.addWidget(self.frame_input, 0, 1)
         control_layout.addWidget(self.search_button, 0, 2)
@@ -574,6 +578,9 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(QLabel("Status:"), 4, 0)
         control_layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
 
+        control_layout.addWidget(QLabel("Segment CSV:"), 5, 0)
+        control_layout.addWidget(self.csv_picker_button, 5, 1, 1, 2)
+
         navigation_layout = QHBoxLayout()
         self.left_button = QPushButton("Left")
         self.right_button = QPushButton("Right")
@@ -585,7 +592,7 @@ class VideoFrameViewer(QMainWindow):
         self.left_jump_button.clicked.connect(self._trigger_left_jump)
         self.right_jump_button.clicked.connect(self._trigger_right_jump)
 
-        control_layout.addLayout(navigation_layout, 5, 0, 1, 3)
+        control_layout.addLayout(navigation_layout, 6, 0, 1, 3)
 
         zoom_layout = QHBoxLayout()
         self.zoom_out_button = QPushButton("Zoom -")
@@ -601,10 +608,10 @@ class VideoFrameViewer(QMainWindow):
         zoom_layout.addWidget(self.zoom_reset_button)
         zoom_layout.addWidget(self.zoom_label)
 
-        control_layout.addLayout(zoom_layout, 6, 0, 1, 3)
+        control_layout.addLayout(zoom_layout, 7, 0, 1, 3)
 
         self.current_frame_label = QLabel("Current frame: -")
-        control_layout.addWidget(self.current_frame_label, 7, 0, 1, 3)
+        control_layout.addWidget(self.current_frame_label, 8, 0, 1, 3)
 
         return control_group
 
@@ -750,6 +757,47 @@ class VideoFrameViewer(QMainWindow):
             )
         else:
             self._set_status("The selected video contains no frames.")
+
+    def _browse_annotation_csv(self) -> None:
+        if not self.video_handler.capture or self.video_handler.video_path is None:
+            self._set_status("Load a video before choosing a CSV file.")
+            return
+
+        if self.time_series_viewer.has_unsaved_annotation_changes():
+            result = QMessageBox.question(
+                self,
+                "Replace CSV?",
+                "Current annotation edits are not saved. Replace the loaded CSV anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if result != QMessageBox.Yes:
+                self._set_status("CSV replacement cancelled.")
+                return
+
+        _, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        start_dir = loaded_csv.parent if loaded_csv is not None else self.directory_input.text()
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select annotation CSV for this segment",
+            str(start_dir),
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not selected:
+            return
+
+        csv_path = Path(selected).expanduser().resolve()
+        if not self.time_series_viewer.load_annotation_file(csv_path):
+            self._set_status(f"Failed to load CSV: {csv_path}")
+            return
+
+        expected_fif, expected_csv = self.time_series_viewer.expected_paths()
+        loaded_fif, loaded_csv = self.time_series_viewer.last_loaded_paths()
+        self._update_summary(
+            self.video_handler.video_path, expected_fif, expected_csv, loaded_fif, loaded_csv
+        )
+        self._load_session_state()
+        self._set_status(f"Loaded replacement CSV for this segment: {csv_path}")
 
     def _save_session_state(self) -> None:
         _, loaded_csv = self.time_series_viewer.last_loaded_paths()
@@ -1109,6 +1157,7 @@ class VideoFrameViewer(QMainWindow):
             self.right_jump_button,
             self.search_button,
             self.time_search_button,
+            self.csv_picker_button,
         ]:
             button.setEnabled(enabled)
         self.remark_input.setEnabled(enabled)
