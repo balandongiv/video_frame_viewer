@@ -1301,6 +1301,12 @@ class VideoFrameViewer(QMainWindow):
         save_annotations_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         save_annotations_shortcut.activated.connect(self._handle_save_annotations_shortcut)
 
+        auto_repair_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        auto_repair_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        auto_repair_annotation_shortcut.activated.connect(
+            self._handle_auto_repair_annotation_shortcut
+        )
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
@@ -1313,6 +1319,7 @@ class VideoFrameViewer(QMainWindow):
         self.next_annotation_min_shortcut = next_annotation_min_shortcut
         self.previous_annotation_letter = previous_annotation_letter
         self.save_annotations_shortcut = save_annotations_shortcut
+        self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -1336,6 +1343,10 @@ class VideoFrameViewer(QMainWindow):
 
     def _handle_save_annotations_shortcut(self) -> None:
         self.time_series_viewer.save_annotations()
+
+    def _handle_auto_repair_annotation_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.auto_repair_selected_annotation()
 
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()

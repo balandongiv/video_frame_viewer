@@ -264,7 +264,10 @@ class TimeSeriesViewer(QWidget):
         right_layout.addStretch()
         right_layout.addWidget(self._build_annotation_nudge_group())
         right_layout.addWidget(
-            QLabel("Shortcuts: [ or P = prev, ] or N = next, Ctrl+N = next (EAR min)")
+            QLabel(
+                "Shortcuts: [ or P = prev, ] or N = next, Space = auto_repair, "
+                "Ctrl+N = next (EAR min)"
+            )
         )
         right_controls.setLayout(right_layout)
 
@@ -1177,15 +1180,26 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText("Annotation label updated.")
 
     def _auto_repair_annotation(self, annotation_item: AnnotationItem) -> None:
-        result = self._auto_repair_bounds(annotation_item.annotation)
+        self._auto_repair_annotation_model(annotation_item.annotation)
+
+    def auto_repair_selected_annotation(self) -> None:
+        """Repair the currently selected annotation using EEG zero crossings."""
+
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation before using auto_repair.")
+            return
+        self._auto_repair_annotation_model(self._selected_annotation)
+
+    def _auto_repair_annotation_model(self, annotation: Annotation) -> None:
+        result = self._auto_repair_bounds(annotation)
         if result is None:
             return
 
         onset, duration, peak_time = result
-        annotation_item.annotation.onset = onset
-        annotation_item.annotation.duration = duration
-        self._sync_annotation_regions(annotation_item.annotation, onset, duration)
-        self._set_selected_annotation(annotation_item.annotation, announce=False)
+        annotation.onset = onset
+        annotation.duration = duration
+        self._sync_annotation_regions(annotation, onset, duration)
+        self._set_selected_annotation(annotation, announce=False)
         self._set_annotations_dirty(True)
         self.status_label.setText(
             "Auto-repaired annotation "
@@ -1744,6 +1758,7 @@ class TimeSeriesViewer(QWidget):
         if target is None:
             return
 
+        self._set_selected_annotation(target, announce=False)
         self._ensure_view_range(target.onset)
         self.annotation_jump_requested.emit(target.onset)
         self.status_label.setText(
