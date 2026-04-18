@@ -457,10 +457,9 @@ class VideoFrameViewer(QMainWindow):
               <tr><td>Left / Right</td><td>Jump left or right by the configured jump size.</td></tr>
               <tr><td>Ctrl + Left / Ctrl + Right</td><td>Move one frame left or right.</td></tr>
               <tr><td>Ctrl + Shift + Left / Right</td><td>Move by the large step size.</td></tr>
-              <tr><td>[ or P</td><td>Go to previous annotation.</td></tr>
-              <tr><td>] or N</td><td>Go to next annotation and select it.</td></tr>
+              <tr><td>[ or B</td><td>Go back to previous annotation.</td></tr>
+              <tr><td>] or N</td><td>Go to next annotation and center on EAR minimum.</td></tr>
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
-              <tr><td>Ctrl + N</td><td>Go to next annotation and center on EAR minimum.</td></tr>
               <tr><td>Ctrl + S</td><td>Save annotations.</td></tr>
             </table>
 
@@ -1385,7 +1384,7 @@ class VideoFrameViewer(QMainWindow):
             self._handle_next_annotation_min_shortcut
         )
 
-        previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_P), self)
+        previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_B), self)
         previous_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         previous_annotation_letter.activated.connect(self._handle_previous_annotation_shortcut)
 

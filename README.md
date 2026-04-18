@@ -80,9 +80,8 @@ The application automatically saves your progress for each video context to a fi
 | **Right Arrow** | Jump forward (default 10 frames) |
 | **Ctrl + Left** | Step backward 1 frame |
 | **Ctrl + Right** | Step forward 1 frame |
-| **[** or **P** | Jump to **Previous** annotation |
-| **]** or **N** | Jump to **Next** annotation |
-| **Ctrl + N** | Jump to **Next** annotation & center on **EAR minimum** |
+| **[** or **B** | Jump **Back** to previous annotation |
+| **]** or **N** | Jump to **Next** annotation & center on **EAR minimum** |
 
 ### Annotations
 | Action | Control |

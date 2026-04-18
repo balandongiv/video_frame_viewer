@@ -788,7 +788,7 @@ class Murat2018Viewer(QMainWindow):
         self.next_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         self.next_annotation_letter.activated.connect(self.time_series_viewer.jump_to_next_annotation)
 
-        self.previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_P), self)
+        self.previous_annotation_letter = QShortcut(QKeySequence(Qt.Key_B), self)
         self.previous_annotation_letter.setContext(Qt.WidgetWithChildrenShortcut)
         self.previous_annotation_letter.activated.connect(
             self.time_series_viewer.jump_to_previous_annotation

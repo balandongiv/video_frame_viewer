@@ -265,6 +265,9 @@ class TimeSeriesViewer(QWidget):
         )
         self.annotations_dirty_label.setFixedWidth(reserved_width)
         center_layout.addWidget(self.annotations_dirty_label)
+        self.annotation_count_label = QLabel("")
+        self.annotation_count_label.setAlignment(Qt.AlignCenter)
+        center_layout.addWidget(self.annotation_count_label)
         center_controls.setLayout(center_layout)
 
         right_controls = QWidget()
@@ -274,8 +277,8 @@ class TimeSeriesViewer(QWidget):
         right_layout.addWidget(self._build_annotation_nudge_group())
         right_layout.addWidget(
             QLabel(
-                "Shortcuts: [ or P = prev, ] or N = next, Space = auto_repair, "
-                "Ctrl+N = next (EAR min)"
+                "Shortcuts: [ or B = back, ] or N = next (EAR min), "
+                "Space = auto_repair"
             )
         )
         right_controls.setLayout(right_layout)
@@ -298,6 +301,7 @@ class TimeSeriesViewer(QWidget):
         layout.setStretch(2, 0)
 
         self._update_annotation_filter_options(force_all=True)
+        self._update_annotation_count_label()
 
     def channel_controls(self) -> QWidget:
         """Expose the channel selection controls for external layouts."""
@@ -394,6 +398,7 @@ class TimeSeriesViewer(QWidget):
         self._annotations = []
         self._set_annotations_dirty(False)
         self._update_annotation_filter_options(force_all=True)
+        self._update_annotation_count_label()
         self._selected_annotation = None
         self._auto_repair_original_bounds.clear()
         self._auto_repair_notes.clear()
@@ -432,6 +437,7 @@ class TimeSeriesViewer(QWidget):
         self._plot_data()
         self._add_annotations_for_path(csv_path)
         self._ensure_view_range(0.0)
+        self._update_annotation_count_label()
 
     def _read_raw_time_series(self, ts_path: Path) -> mne.io.BaseRaw:
         suffix = ts_path.suffix.lower()
@@ -860,6 +866,7 @@ class TimeSeriesViewer(QWidget):
             cursor_line.setPos(center)
             cursor_line.show()
         self._update_lane_scales(x_min, x_max)
+        self._update_annotation_count_label()
 
     def _max_span_seconds(self) -> float:
         if self._times is None or self._times.size == 0:
@@ -894,6 +901,26 @@ class TimeSeriesViewer(QWidget):
         self._selected_annotation = None
         self._auto_repair_original_bounds.clear()
         self._auto_repair_notes.clear()
+        self._update_annotation_count_label()
+
+    def _annotation_count_text(self) -> str:
+        total = len(self._annotations)
+        if total == 0:
+            return "Blinks: 0"
+
+        current_time = self._last_cursor_time
+        previous_or_current = sum(
+            1 for annotation in self._annotations if annotation.onset <= current_time
+        )
+        ahead = total - previous_or_current
+        return (
+            f"Blinks: {total} total | {previous_or_current} at/before "
+            f"{current_time:.2f}s | {ahead} ahead"
+        )
+
+    def _update_annotation_count_label(self) -> None:
+        if hasattr(self, "annotation_count_label"):
+            self.annotation_count_label.setText(self._annotation_count_text())
 
     def _color_for_description(self, description: str) -> pg.Color:
         if description not in self._annotation_colors:
@@ -1016,6 +1043,7 @@ class TimeSeriesViewer(QWidget):
         else:
             self.annotations_dirty_label.setText("")
         self.save_annotations_button.setEnabled(dirty and self._annotation_csv_path() is not None)
+        self._update_annotation_count_label()
 
     def _annotation_csv_path(self) -> Optional[Path]:
         if self._direct_annotation_path is not None:
@@ -2050,9 +2078,9 @@ class TimeSeriesViewer(QWidget):
         return min_time, min_value, times, data, None
 
     def jump_to_next_annotation(self) -> None:
-        """Jump the view to the next annotation onset."""
+        """Jump to the next annotation and center on the EAR-avg_ear minimum."""
 
-        self._jump_to_annotation(direction="next")
+        self.jump_to_next_annotation_minimum()
 
     def jump_to_previous_annotation(self) -> None:
         """Jump the view to the previous annotation onset."""
@@ -2078,6 +2106,7 @@ class TimeSeriesViewer(QWidget):
         if target is None:
             return
 
+        self._set_selected_annotation(target, announce=False)
         min_time, min_value, times, data, message = self._annotation_minimum_time(target)
         if min_time is None:
             self._clear_annotation_samples()
