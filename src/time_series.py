@@ -1063,11 +1063,14 @@ class TimeSeriesViewer(QWidget):
         self._set_selected_annotation(annotation_item.annotation)
         menu = QMenu(self)
         edit_action = menu.addAction("Edit label")
+        auto_repair_action = menu.addAction("auto_repair")
         delete_action = menu.addAction("Delete annotation")
         selected_action = menu.exec_(self.plot_widget.viewport().mapToGlobal(pos))
         if selected_action == edit_action:
             self._edit_annotation_description(annotation_item)
-        if selected_action == delete_action:
+        elif selected_action == auto_repair_action:
+            self._auto_repair_annotation(annotation_item)
+        elif selected_action == delete_action:
             self._delete_annotation(annotation_item)
 
     def _annotation_item_at(self, pos) -> Optional[AnnotationItem]:
@@ -1172,6 +1175,147 @@ class TimeSeriesViewer(QWidget):
         self._update_annotation_filter_options()
         self._set_annotations_dirty(True)
         self.status_label.setText("Annotation label updated.")
+
+    def _auto_repair_annotation(self, annotation_item: AnnotationItem) -> None:
+        result = self._auto_repair_bounds(annotation_item.annotation)
+        if result is None:
+            return
+
+        onset, duration, peak_time = result
+        annotation_item.annotation.onset = onset
+        annotation_item.annotation.duration = duration
+        self._sync_annotation_regions(annotation_item.annotation, onset, duration)
+        self._set_selected_annotation(annotation_item.annotation, announce=False)
+        self._set_annotations_dirty(True)
+        self.status_label.setText(
+            "Auto-repaired annotation "
+            f"to {onset:.3f}s-{onset + duration:.3f}s around EEG peak {peak_time:.3f}s."
+        )
+
+    def _auto_repair_bounds(
+        self, annotation: Annotation
+    ) -> Optional[tuple[float, float, float]]:
+        if self.raw is None or self._times is None or self._times.size == 0:
+            self.status_label.setText("No EEG time series loaded for auto_repair.")
+            return None
+
+        try:
+            channel_index = self.raw.ch_names.index(PRIMARY_CHANNEL)
+        except ValueError:
+            self.status_label.setText(f"{PRIMARY_CHANNEL} not available for auto_repair.")
+            return None
+
+        data_end = float(self._times[-1])
+        start = max(0.0, annotation.onset)
+        end = min(annotation.onset + annotation.duration, data_end)
+        if end <= start:
+            self.status_label.setText("Annotation is empty; auto_repair skipped.")
+            return None
+
+        start_sample = int(np.searchsorted(self._times, start, side="left"))
+        end_sample = int(np.searchsorted(self._times, end, side="right"))
+        if end_sample <= start_sample:
+            self.status_label.setText("No EEG samples in annotation; auto_repair skipped.")
+            return None
+
+        channel_data = self.raw.get_data(picks=[channel_index], verbose="ERROR")[0]
+        channel_times = self.raw.times
+        if channel_data.size != channel_times.size:
+            self.status_label.setText("EEG sample/time mismatch; auto_repair skipped.")
+            return None
+
+        annotation_data = channel_data[start_sample:end_sample]
+        annotation_times = channel_times[start_sample:end_sample]
+        finite_mask = np.isfinite(annotation_data) & np.isfinite(annotation_times)
+        if not np.any(finite_mask):
+            self.status_label.setText("No finite EEG samples in annotation; auto_repair skipped.")
+            return None
+
+        valid_indices = np.nonzero(finite_mask)[0] + start_sample
+        peak_index = int(valid_indices[np.argmax(channel_data[valid_indices])])
+        repaired = self._repair_bounds_from_peak(channel_times, channel_data, peak_index)
+        if repaired is None:
+            self.status_label.setText(
+                "Could not find upward and downward zero crossings for auto_repair."
+            )
+            return None
+
+        repaired_start, repaired_end, peak_time = repaired
+        onset, duration = self._normalize_region_values(repaired_start, repaired_end)
+        return onset, duration, peak_time
+
+    @staticmethod
+    def _repair_bounds_from_samples(
+        times: np.ndarray, data: np.ndarray
+    ) -> Optional[tuple[float, float, float]]:
+        if times.size == 0 or data.size == 0 or times.size != data.size:
+            return None
+
+        peak_index = int(np.argmax(data))
+        return TimeSeriesViewer._repair_bounds_from_peak(times, data, peak_index)
+
+    @staticmethod
+    def _repair_bounds_from_peak(
+        times: np.ndarray, data: np.ndarray, peak_index: int
+    ) -> Optional[tuple[float, float, float]]:
+        if (
+            times.size == 0
+            or data.size == 0
+            or times.size != data.size
+            or peak_index < 0
+            or peak_index >= data.size
+        ):
+            return None
+
+        if data[peak_index] <= 0:
+            return None
+
+        left_crossing = TimeSeriesViewer._nearest_upward_zero_crossing(
+            times, data, peak_index
+        )
+        right_crossing = TimeSeriesViewer._nearest_downward_zero_crossing(
+            times, data, peak_index
+        )
+        if left_crossing is None or right_crossing is None or right_crossing <= left_crossing:
+            return None
+
+        return left_crossing, right_crossing, float(times[peak_index])
+
+    @staticmethod
+    def _nearest_upward_zero_crossing(
+        times: np.ndarray, data: np.ndarray, peak_index: int
+    ) -> Optional[float]:
+        for index in range(peak_index, 0, -1):
+            left = float(data[index - 1])
+            right = float(data[index])
+            if left <= 0.0 < right:
+                return TimeSeriesViewer._interpolated_zero_time(
+                    float(times[index - 1]), left, float(times[index]), right
+                )
+        return float(times[0]) if data[0] == 0.0 else None
+
+    @staticmethod
+    def _nearest_downward_zero_crossing(
+        times: np.ndarray, data: np.ndarray, peak_index: int
+    ) -> Optional[float]:
+        for index in range(peak_index + 1, data.size):
+            left = float(data[index - 1])
+            right = float(data[index])
+            if left > 0.0 >= right:
+                return TimeSeriesViewer._interpolated_zero_time(
+                    float(times[index - 1]), left, float(times[index]), right
+                )
+        return float(times[-1]) if data[-1] == 0.0 else None
+
+    @staticmethod
+    def _interpolated_zero_time(
+        left_time: float, left_value: float, right_time: float, right_value: float
+    ) -> float:
+        if right_value == left_value:
+            return left_time
+        fraction = -left_value / (right_value - left_value)
+        fraction = max(0.0, min(1.0, fraction))
+        return left_time + fraction * (right_time - left_time)
 
     def _refresh_annotation_visuals(self, annotation: Annotation) -> None:
         base_color = self._color_for_description(annotation.description)

@@ -1,8 +1,11 @@
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from config import AppConfig
 from paths import derive_annotation_path, derive_time_series_path
+from time_series import TimeSeriesViewer
 
 
 class DeriveTimeSeriesPathTests(unittest.TestCase):
@@ -76,6 +79,38 @@ class DeriveTimeSeriesPathTests(unittest.TestCase):
             self.config.annotation_root / "S1" / "S01_20170519_043933_2" / "ear_eog.csv"
         )
         self.assertEqual(annotation_path, expected)
+
+
+class AutoRepairAnnotationTests(unittest.TestCase):
+    def test_uses_peak_and_nearest_zero_crossings(self) -> None:
+        times = np.array([0.0, 0.1, 0.2, 0.3, 0.4])
+        data = np.array([-1.0, 1.0, 5.0, 1.0, -1.0])
+
+        repaired = TimeSeriesViewer._repair_bounds_from_samples(times, data)
+
+        self.assertEqual(repaired, (0.05, 0.35, 0.2))
+
+    def test_repairs_overshot_annotation_to_zero_crossings_around_peak(self) -> None:
+        times = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+        data = np.array([-1.0, 1.0, -1.0, 1.0, 6.0, 1.0, -1.0, 1.0])
+
+        repaired = TimeSeriesViewer._repair_bounds_from_samples(times, data)
+
+        self.assertEqual(repaired, (0.25, 0.55, 0.4))
+
+    def test_can_find_crossings_outside_current_annotation_window(self) -> None:
+        times = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+        data = np.array([-1.0, -0.5, 2.0, 5.0, 2.0, -1.0])
+
+        repaired = TimeSeriesViewer._repair_bounds_from_peak(times, data, peak_index=3)
+
+        self.assertEqual(repaired, (0.12, 0.4666666666666667, 0.3))
+
+    def test_rejects_when_peak_has_no_positive_zero_crossing_lobe(self) -> None:
+        times = np.array([0.0, 0.1, 0.2])
+        data = np.array([-1.0, -0.5, -1.0])
+
+        self.assertIsNone(TimeSeriesViewer._repair_bounds_from_samples(times, data))
 
 
 if __name__ == "__main__":
