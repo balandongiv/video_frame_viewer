@@ -45,6 +45,12 @@ from time_series import TimeSeriesViewer
 DEFAULT_MURAT_ROOT = Path(r"D:\dataset\murat_2018")
 SESSION_FILENAME = "Murat2018Viewer.yaml"
 BLINKER_PICKLE = "blinker_results.pkl"
+DEFAULT_SESSION_STATE = {
+    "stop_position": 0.0,
+    "status": "Pending",
+    "remark": "",
+    "remarks": [],
+}
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,16 @@ class MuratRecording:
     @property
     def session_path(self) -> Path:
         return self.folder / SESSION_FILENAME
+
+
+def ensure_murat_session_file(folder: Path) -> Path:
+    """Create the Murat review session YAML in a recording folder if missing."""
+
+    session_path = folder / SESSION_FILENAME
+    if not session_path.exists():
+        with session_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(DEFAULT_SESSION_STATE, handle, sort_keys=False)
+    return session_path
 
 
 class Murat2018Viewer(QMainWindow):
@@ -340,13 +356,16 @@ class Murat2018Viewer(QMainWindow):
             edf_files = sorted(folder.glob("*.edf"), key=lambda path: path.name.lower())
             if not edf_files:
                 continue
-            recordings.append(
-                MuratRecording(
-                    subject_id=folder.name,
-                    folder=folder,
-                    edf_path=edf_files[0],
-                )
+            recording = MuratRecording(
+                subject_id=folder.name,
+                folder=folder,
+                edf_path=edf_files[0],
             )
+            try:
+                ensure_murat_session_file(recording.folder)
+            except Exception:
+                pass
+            recordings.append(recording)
         return recordings
 
     def _subject_sort_key(self, value: str) -> tuple[int, str]:
@@ -628,8 +647,9 @@ class Murat2018Viewer(QMainWindow):
         if not isinstance(remarks, list):
             remarks = []
 
+        current_position = self.time_series_viewer.current_cursor_time()
         data = {
-            "stop_time": self.time_series_viewer.current_cursor_time(),
+            "stop_position": current_position,
             "status": self.status_value,
             "remark": self.remark_input.toPlainText().strip(),
             "remarks": remarks,
@@ -662,7 +682,9 @@ class Murat2018Viewer(QMainWindow):
             self.status_value = status
             self.remark_input.setPlainText(str(data.get("remark", "")))
             self._refresh_remark_history(self._extract_remarks(data))
-            stop_time = self._numeric_value(data.get("stop_time"))
+            stop_time = self._numeric_value(data.get("stop_position"))
+            if stop_time is None:
+                stop_time = self._numeric_value(data.get("stop_time"))
             if stop_time is not None and stop_time > 0:
                 self.time_series_viewer.seek_time(stop_time)
             self._update_current_time_label()
@@ -698,7 +720,7 @@ class Murat2018Viewer(QMainWindow):
         )
         data.update(
             {
-                "stop_time": self.time_series_viewer.current_cursor_time(),
+                "stop_position": self.time_series_viewer.current_cursor_time(),
                 "status": self.status_value,
                 "remark": remark_text,
                 "remarks": remarks,

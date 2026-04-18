@@ -12,7 +12,12 @@ if SRC_DIR.exists():
 
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
-from murat_2018_gui import DEFAULT_MURAT_ROOT, Murat2018Viewer  # noqa: E402
+from murat_2018_gui import (  # noqa: E402
+    DEFAULT_MURAT_ROOT,
+    SESSION_FILENAME,
+    Murat2018Viewer,
+    ensure_murat_session_file,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -28,9 +33,34 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _ensure_session_logs(dataset_root: Path) -> int:
+    """Create missing review YAML logs for Murat recording folders."""
+
+    if not dataset_root.exists():
+        return 0
+
+    created = 0
+    for folder in sorted(path for path in dataset_root.iterdir() if path.is_dir()):
+        has_recording = any(folder.glob("*.edf")) or any(folder.glob("*.fif"))
+        if not has_recording:
+            continue
+        session_path = folder / SESSION_FILENAME
+        if session_path.exists():
+            continue
+        try:
+            ensure_murat_session_file(folder)
+        except Exception:
+            continue
+        else:
+            created += 1
+    return created
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    _ensure_session_logs(args.dataset_root)
 
     app = QApplication(argv or sys.argv)
     window = Murat2018Viewer(dataset_root=args.dataset_root)
