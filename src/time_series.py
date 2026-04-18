@@ -317,6 +317,13 @@ class TimeSeriesViewer(QWidget):
 
         return self._last_cursor_time
 
+    def signal_duration_seconds(self) -> Optional[float]:
+        """Return the loaded signal duration in seconds."""
+
+        if self._times is None or self._times.size == 0:
+            return None
+        return float(self._times[-1])
+
     def seek_time(self, seconds: float) -> None:
         """Move the time-series view to the requested time in seconds."""
 

@@ -540,8 +540,19 @@ class Murat2018Viewer(QMainWindow):
         self._set_status(f"Displaying time {self.time_series_viewer.current_cursor_time():.3f}s.")
 
     def _update_current_time_label(self) -> None:
+        current_time = self.time_series_viewer.current_cursor_time()
+        duration = self.time_series_viewer.signal_duration_seconds()
+        if duration is None or duration <= 0:
+            self.current_time_label.setText(f"Current time: {current_time:.3f}s")
+            return
+
+        clamped_time = max(0.0, min(current_time, duration))
+        remaining = max(0.0, duration - clamped_time)
+        percent_complete = (clamped_time / duration) * 100
         self.current_time_label.setText(
-            f"Current time: {self.time_series_viewer.current_cursor_time():.3f}s"
+            "Current time: "
+            f"{clamped_time:.3f}s / {duration:.3f}s "
+            f"({percent_complete:.1f}% complete, {remaining:.3f}s left)"
         )
 
     def _update_review_controls(self, enabled: bool) -> None:
