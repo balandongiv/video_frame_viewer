@@ -381,13 +381,14 @@ class VideoFrameViewer(QMainWindow):
         self.summary_overall_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary_overall_label.setWordWrap(True)
 
-        self.summary_table = QTableWidget(0, 7)
+        self.summary_table = QTableWidget(0, 8)
         self.summary_table.setHorizontalHeaderLabels(
             [
                 "Subject",
                 "Pending",
                 "Ongoing",
                 "Complete",
+                "complete_eeg",
                 "Issue",
                 "Missing CSV",
                 "Missing FIF",
@@ -475,7 +476,9 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(apply_sync_offset_button, 3, 2)
 
         self.status_dropdown = QComboBox()
-        self.status_dropdown.addItems(["Pending", "Ongoing", "Complete","Issue"])
+        self.status_dropdown.addItems(
+            ["Pending", "Ongoing", "Complete", "complete_eeg", "Issue"]
+        )
         self.status_dropdown.currentTextChanged.connect(self._on_status_changed)
         control_layout.addWidget(QLabel("Status:"), 4, 0)
         control_layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
@@ -1135,6 +1138,7 @@ class VideoFrameViewer(QMainWindow):
                     "Pending": 0,
                     "Ongoing": 0,
                     "Complete": 0,
+                    "complete_eeg": 0,
                     "Issue": 0,
                     "Missing CSV": 0,
                     "Missing FIF": 0,
@@ -1149,6 +1153,7 @@ class VideoFrameViewer(QMainWindow):
             "Pending": 0,
             "Ongoing": 0,
             "Complete": 0,
+            "complete_eeg": 0,
             "Issue": 0,
             "Missing CSV": 0,
             "Missing FIF": 0,
@@ -1164,6 +1169,7 @@ class VideoFrameViewer(QMainWindow):
             f"Pending: {totals['Pending']}, "
             f"Ongoing: {totals['Ongoing']}, "
             f"Complete: {totals['Complete']}, "
+            f"complete_eeg: {totals['complete_eeg']}, "
             f"Issue: {totals['Issue']} | "
             f"Missing CSV: {totals['Missing CSV']}, "
             f"Missing FIF: {totals['Missing FIF']}"
@@ -1191,7 +1197,7 @@ class VideoFrameViewer(QMainWindow):
             return "Pending"
 
         status = data.get("status", "Pending")
-        if status not in {"Pending", "Ongoing", "Complete", "Issue"}:
+        if status not in {"Pending", "Ongoing", "Complete", "complete_eeg", "Issue"}:
             return "Pending"
         return status
 
@@ -1209,6 +1215,7 @@ class VideoFrameViewer(QMainWindow):
                 str(counts.get("Pending", 0)),
                 str(counts.get("Ongoing", 0)),
                 str(counts.get("Complete", 0)),
+                str(counts.get("complete_eeg", 0)),
                 str(counts.get("Issue", 0)),
                 str(counts.get("Missing CSV", 0)),
                 str(counts.get("Missing FIF", 0)),
