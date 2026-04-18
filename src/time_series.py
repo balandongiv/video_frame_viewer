@@ -18,6 +18,7 @@ import pyqtgraph as pg
 from mne.io.constants import FIFF
 from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -128,6 +129,8 @@ class TimeSeriesViewer(QWidget):
         self._last_annotation_description = ""
         self._annotation_filter_value = self.FILTER_ALL
         self._selected_annotation: Optional[Annotation] = None
+        self._auto_repair_original_bounds: dict[int, tuple[float, float]] = {}
+        self._auto_repair_notes: dict[int, str] = {}
         self._ear_gain_enabled = False
         self._ear_gain_value = 1.0
         self._ear_baseline_value = (
@@ -243,6 +246,9 @@ class TimeSeriesViewer(QWidget):
         self.save_annotations_button.clicked.connect(self._save_annotations)
         self.save_annotations_button.setEnabled(False)
         left_layout.addWidget(self.save_annotations_button)
+        self.bulk_auto_repair_button = QPushButton("Bulk auto_repair")
+        self.bulk_auto_repair_button.clicked.connect(self.bulk_auto_repair_annotations)
+        left_layout.addWidget(self.bulk_auto_repair_button)
         left_controls.setLayout(left_layout)
 
         center_controls = QWidget()
@@ -386,6 +392,8 @@ class TimeSeriesViewer(QWidget):
         self._set_annotations_dirty(False)
         self._update_annotation_filter_options(force_all=True)
         self._selected_annotation = None
+        self._auto_repair_original_bounds.clear()
+        self._auto_repair_notes.clear()
 
     def _load_time_series_paths(
         self,
@@ -881,6 +889,8 @@ class TimeSeriesViewer(QWidget):
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None
         self._selected_annotation = None
+        self._auto_repair_original_bounds.clear()
+        self._auto_repair_notes.clear()
 
     def _color_for_description(self, description: str) -> pg.Color:
         if description not in self._annotation_colors:
@@ -1043,6 +1053,10 @@ class TimeSeriesViewer(QWidget):
 
         self.status_label.setText(f"Saved annotations to {csv_path}.")
         self._set_annotations_dirty(False)
+        self._auto_repair_original_bounds.clear()
+        self._auto_repair_notes.clear()
+        for annotation in self._annotations:
+            self._refresh_annotation_visuals(annotation)
         self._restore_plot_focus()
 
     def save_annotations(self) -> None:
@@ -1067,12 +1081,18 @@ class TimeSeriesViewer(QWidget):
         menu = QMenu(self)
         edit_action = menu.addAction("Edit label")
         auto_repair_action = menu.addAction("auto_repair")
+        revert_auto_repair_action = menu.addAction("Revert auto_repair")
+        revert_auto_repair_action.setEnabled(
+            id(annotation_item.annotation) in self._auto_repair_original_bounds
+        )
         delete_action = menu.addAction("Delete annotation")
         selected_action = menu.exec_(self.plot_widget.viewport().mapToGlobal(pos))
         if selected_action == edit_action:
             self._edit_annotation_description(annotation_item)
         elif selected_action == auto_repair_action:
             self._auto_repair_annotation(annotation_item)
+        elif selected_action == revert_auto_repair_action:
+            self._revert_auto_repair(annotation_item.annotation)
         elif selected_action == delete_action:
             self._delete_annotation(annotation_item)
 
@@ -1101,7 +1121,7 @@ class TimeSeriesViewer(QWidget):
             movable=True,
         )
         region.setZValue(10 + index)
-        region.setToolTip(annotation.description)
+        region.setToolTip(self._annotation_tooltip(annotation))
         region.setVisible(self._annotation_visible(annotation))
         widget.addItem(region)
         return region
@@ -1195,16 +1215,159 @@ class TimeSeriesViewer(QWidget):
         if result is None:
             return
 
+        self._store_auto_repair_original_bounds(annotation)
         onset, duration, peak_time = result
+        unchanged = math.isclose(annotation.onset, onset) and math.isclose(
+            annotation.duration, duration
+        )
         annotation.onset = onset
         annotation.duration = duration
         self._sync_annotation_regions(annotation, onset, duration)
         self._set_selected_annotation(annotation, announce=False)
         self._set_annotations_dirty(True)
+        self._mark_auto_repaired(annotation)
+        if unchanged:
+            self.status_label.setText(
+                "Auto_repair checked annotation; bounds were already aligned "
+                f"around EEG peak {peak_time:.3f}s."
+            )
+        else:
+            self.status_label.setText(
+                "Auto-repaired annotation "
+                f"to {onset:.3f}s-{onset + duration:.3f}s around EEG peak {peak_time:.3f}s."
+            )
+
+    def bulk_auto_repair_annotations(self) -> None:
+        """Repair every annotation in memory without saving the CSV."""
+
+        if not self._annotations:
+            self.status_label.setText("No annotations available for bulk auto_repair.")
+            return
+
+        total_count = len(self._annotations)
+        self.bulk_auto_repair_button.setEnabled(False)
+        self.bulk_auto_repair_button.setText("Repairing...")
+        self.status_label.setText(f"Bulk auto_repair running: 0/{total_count} checked.")
+        QApplication.processEvents()
+
+        repaired_count = 0
+        failed_count = 0
+        unchanged_count = 0
+        last_repaired: Optional[Annotation] = None
+        try:
+            for checked_count, annotation in enumerate(list(self._annotations), start=1):
+                result = self._auto_repair_bounds(annotation)
+                if result is None:
+                    failed_count += 1
+                else:
+                    self._store_auto_repair_original_bounds(annotation)
+                    onset, duration, _peak_time = result
+                    unchanged = math.isclose(annotation.onset, onset) and math.isclose(
+                        annotation.duration, duration
+                    )
+                    annotation.onset = onset
+                    annotation.duration = duration
+                    self._sync_annotation_regions(annotation, onset, duration)
+                    self._mark_auto_repaired(annotation)
+                    if unchanged:
+                        unchanged_count += 1
+                    else:
+                        repaired_count += 1
+                    last_repaired = annotation
+
+                if checked_count % 10 == 0 or checked_count == total_count:
+                    self.status_label.setText(
+                        "Bulk auto_repair running: "
+                        f"{checked_count}/{total_count} checked, "
+                        f"{repaired_count} changed, {unchanged_count} unchanged, "
+                        f"{failed_count} failed."
+                    )
+                    QApplication.processEvents()
+        finally:
+            self.bulk_auto_repair_button.setEnabled(True)
+            self.bulk_auto_repair_button.setText("Bulk auto_repair")
+
+        overlap_count = self._mark_auto_repair_overlaps()
+        if repaired_count == 0 and unchanged_count == 0:
+            self.status_label.setText(
+                f"Bulk auto_repair could not repair any annotations ({failed_count} failed)."
+            )
+            return
+
+        if last_repaired is not None:
+            self._set_selected_annotation(last_repaired, announce=False)
+        self._set_annotations_dirty(True)
         self.status_label.setText(
-            "Auto-repaired annotation "
-            f"to {onset:.3f}s-{onset + duration:.3f}s around EEG peak {peak_time:.3f}s."
+            "Bulk auto_repair finished without saving: "
+            f"{repaired_count} changed, {unchanged_count} already aligned, "
+            f"{failed_count} failed. "
+            f"0 deleted, 0 merged, {overlap_count} overlap-review pair(s). "
+            "Annotations were kept separate. "
+            "Right-click an annotation and choose Revert auto_repair to restore it."
         )
+
+    def _store_auto_repair_original_bounds(self, annotation: Annotation) -> None:
+        self._auto_repair_original_bounds.setdefault(
+            id(annotation),
+            (annotation.onset, annotation.duration),
+        )
+
+    def _revert_auto_repair(self, annotation: Annotation) -> None:
+        original = self._auto_repair_original_bounds.pop(id(annotation), None)
+        if original is None:
+            self.status_label.setText("No auto_repair history for this annotation.")
+            return
+
+        onset, duration = original
+        annotation.onset = onset
+        annotation.duration = duration
+        self._auto_repair_notes.pop(id(annotation), None)
+        self._sync_annotation_regions(annotation, onset, duration)
+        self._refresh_annotation_visuals(annotation)
+        self._set_selected_annotation(annotation, announce=False)
+        self._set_annotations_dirty(True)
+        self.status_label.setText(
+            f"Reverted annotation to {onset:.3f}s-{onset + duration:.3f}s."
+        )
+
+    def _mark_auto_repaired(self, annotation: Annotation) -> None:
+        self._auto_repair_notes[id(annotation)] = "AUTO_REPAIRED - revert available"
+        self._refresh_annotation_visuals(annotation)
+
+    def _mark_auto_repair_overlaps(self) -> int:
+        for annotation_id, note in list(self._auto_repair_notes.items()):
+            if "OVERLAPS" in note:
+                self._auto_repair_notes[annotation_id] = note.replace("; OVERLAPS after repair", "")
+
+        overlap_annotations: set[int] = set()
+        overlap_count = 0
+        annotations = sorted(self._annotations, key=lambda item: item.onset)
+        for index, annotation in enumerate(annotations):
+            annotation_end = annotation.onset + annotation.duration
+            for other in annotations[index + 1 :]:
+                if other.onset >= annotation_end:
+                    break
+                overlap_count += 1
+                overlap_annotations.add(id(annotation))
+                overlap_annotations.add(id(other))
+
+        for annotation in self._annotations:
+            annotation_id = id(annotation)
+            if annotation_id not in overlap_annotations:
+                continue
+            note = self._auto_repair_notes.get(annotation_id, "AUTO_REPAIRED - revert available")
+            if "OVERLAPS" not in note:
+                note = f"{note}; OVERLAPS after repair"
+            self._auto_repair_notes[annotation_id] = note
+            self._refresh_annotation_visuals(annotation)
+
+        return overlap_count
+
+    def _annotation_tooltip(self, annotation: Annotation) -> str:
+        note = self._auto_repair_notes.get(id(annotation))
+        if not note:
+            return annotation.description
+        return f"{annotation.description}\n{note}"
 
     def _auto_repair_bounds(
         self, annotation: Annotation
@@ -1337,15 +1500,39 @@ class TimeSeriesViewer(QWidget):
         brush_color.setAlpha(60)
         pen_color = pg.mkColor(base_color)
         pen_color.setAlpha(160)
+        pen_width = 1
+
+        note = self._auto_repair_notes.get(id(annotation), "")
+        if "OVERLAPS" in note:
+            brush_color = pg.mkColor("#ffeb3b")
+            brush_color.setAlpha(140)
+            pen_color = pg.mkColor("#d32f2f")
+            pen_color.setAlpha(255)
+            pen_width = 3
+        elif note:
+            brush_color = pg.mkColor("#81d4fa")
+            brush_color.setAlpha(120)
+            pen_color = pg.mkColor("#0277bd")
+            pen_color.setAlpha(255)
+            pen_width = 2
 
         for items in self._annotation_items_by_widget.values():
             for item in items:
                 if item.annotation != annotation:
                     continue
-                item.region.setToolTip(annotation.description)
+                item.region.setToolTip(self._annotation_tooltip(annotation))
                 item.region.setBrush(pg.mkBrush(brush_color))
-                item.region.setPen(pg.mkPen(pen_color, width=1))
+                self._set_region_pen(item.region, pg.mkPen(pen_color, width=pen_width))
                 item.region.setVisible(self._annotation_visible(annotation))
+
+    @staticmethod
+    def _set_region_pen(region: pg.LinearRegionItem, pen: pg.Pen) -> None:
+        if hasattr(region, "setPen"):
+            region.setPen(pen)
+            return
+        for line in getattr(region, "lines", []):
+            if hasattr(line, "setPen"):
+                line.setPen(pen)
 
     def _current_annotations_for_save(self) -> List[Annotation]:
         items = self._annotation_items_by_widget.get(self.plot_widget, [])
@@ -1417,6 +1604,8 @@ class TimeSeriesViewer(QWidget):
             return sum(1 for _ in reader)
 
     def _remove_annotation_from_model(self, annotation: Annotation) -> None:
+        self._auto_repair_original_bounds.pop(id(annotation), None)
+        self._auto_repair_notes.pop(id(annotation), None)
         self._annotations = [item for item in self._annotations if item is not annotation]
 
     def _delete_annotation(self, annotation_item: AnnotationItem) -> None:
@@ -2009,8 +2198,11 @@ class TimeSeriesViewer(QWidget):
     def _set_selected_annotation(self, annotation: Annotation, announce: bool = True) -> None:
         self._selected_annotation = annotation
         if announce:
+            note = self._auto_repair_notes.get(id(annotation))
+            note_text = f" [{note}]" if note else ""
             self.status_label.setText(
                 f"Selected annotation '{annotation.description}' at {annotation.onset:.2f}s."
+                f"{note_text}"
             )
 
     def _nudge_selected_annotation(self, direction: int) -> None:

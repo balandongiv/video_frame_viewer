@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -315,11 +316,13 @@ class VideoFrameViewer(QMainWindow):
 
         navigation_tab = self._build_navigation_tab()
         summary_tab = self._build_summary_tab()
+        help_tab = self._build_help_tab()
 
         tabs.addTab(videos_tab, "Videos")
         tabs.addTab(channels_tab, "Channels")
         tabs.addTab(navigation_tab, "Navigation")
         tabs.addTab(summary_tab, "Summary")
+        tabs.addTab(help_tab, "Help")
 
         return tabs
 
@@ -427,6 +430,89 @@ class VideoFrameViewer(QMainWindow):
         layout.addStretch()
         summary_tab.setLayout(layout)
         return summary_tab
+
+    def _build_help_tab(self) -> QWidget:
+        help_tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        help_text = QTextBrowser()
+        help_text.setOpenExternalLinks(False)
+        help_text.setHtml(
+            """
+            <h2>Video Frame Viewer Help</h2>
+
+            <h3>Basic Workflow</h3>
+            <ol>
+              <li>Select or enter the dataset root, then click <b>Rescan</b>.</li>
+              <li>Select a video from <b>Discovered Videos</b>.</li>
+              <li>Use frame/time controls or shortcuts to navigate.</li>
+              <li>Use the time-series panel to inspect EEG/EOG/EAR signals and annotations.</li>
+              <li>After annotation edits, click <b>Save annotations</b>.</li>
+            </ol>
+
+            <h3>Shortcuts</h3>
+            <table border="1" cellspacing="0" cellpadding="4">
+              <tr><th>Shortcut</th><th>Action</th></tr>
+              <tr><td>Left / Right</td><td>Jump left or right by the configured jump size.</td></tr>
+              <tr><td>Ctrl + Left / Ctrl + Right</td><td>Move one frame left or right.</td></tr>
+              <tr><td>Ctrl + Shift + Left / Right</td><td>Move by the large step size.</td></tr>
+              <tr><td>[ or P</td><td>Go to previous annotation.</td></tr>
+              <tr><td>] or N</td><td>Go to next annotation and select it.</td></tr>
+              <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
+              <tr><td>Ctrl + N</td><td>Go to next annotation and center on EAR minimum.</td></tr>
+              <tr><td>Ctrl + S</td><td>Save annotations.</td></tr>
+            </table>
+
+            <h3>Creating and Editing Annotations</h3>
+            <ul>
+              <li>Ctrl + left-drag on the main time-series plot to create an annotation.</li>
+              <li>Drag annotation boundaries to manually adjust onset/duration.</li>
+              <li>Right-click an annotation for <b>Edit label</b>, <b>auto_repair</b>,
+                  <b>Revert auto_repair</b>, or <b>Delete annotation</b>.</li>
+              <li>The <b>Unsaved changes</b> label means annotations changed in memory but are not saved yet.</li>
+            </ul>
+
+            <h3>Auto Repair</h3>
+            <p>
+              Auto repair uses the EEG channel <b>EEG-E8</b>. It finds the highest positive EEG peak
+              around the selected annotation, then adjusts the annotation boundaries to the nearest
+              upward zero crossing before the peak and the nearest downward zero crossing after the peak.
+            </p>
+            <ul>
+              <li><b>Space</b>: repair the currently selected annotation.</li>
+              <li><b>Right-click &gt; auto_repair</b>: repair the clicked annotation.</li>
+              <li><b>Bulk auto_repair</b>: repair all annotations in memory. This does <b>not</b> save automatically.</li>
+              <li>Bulk auto_repair never merges annotations. Each annotation remains separate.</li>
+              <li><b>Right-click &gt; Revert auto_repair</b>: restore that annotation's original onset/duration.</li>
+            </ul>
+
+            <h3>Bulk Auto Repair Review</h3>
+            <ul>
+              <li><b>Blue annotation</b>: auto-repaired; revert is available.</li>
+              <li><b>Yellow annotation with red border</b>: auto-repaired and overlaps another annotation;
+                  review before saving.</li>
+              <li>The status line reports changed, already aligned, failed, deleted, merged, and overlap-review counts.</li>
+              <li>Current auto repair does not automatically delete or merge annotations. Overlaps are marked only for review.</li>
+            </ul>
+
+            <h3>Status Dropdown</h3>
+            <p>
+              Use the status dropdown to mark the current video session:
+              <b>Pending</b>, <b>Ongoing</b>, <b>Complete</b>, <b>complete_eeg</b>, or <b>Issue</b>.
+            </p>
+
+            <h3>Saving</h3>
+            <p>
+              Auto repair, bulk repair, manual boundary edits, label edits, and deletes stay in memory until
+              <b>Save annotations</b> is clicked. Saving writes the annotation CSV and clears auto-repair
+              visual review markers.
+            </p>
+            """
+        )
+        layout.addWidget(help_text)
+        help_tab.setLayout(layout)
+        return help_tab
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
