@@ -106,6 +106,20 @@ class AutoRepairAnnotationTests(unittest.TestCase):
 
         self.assertEqual(repaired, (0.12, 0.4666666666666667, 0.3))
 
+    def test_does_not_borrow_neighbor_zero_crossing(self) -> None:
+        times = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+        data = np.array([-1.0, 1.0, 4.0, 1.0, 1.0, 2.0, 1.0, -1.0])
+
+        repaired = TimeSeriesViewer._repair_bounds_from_peak(
+            times,
+            data,
+            peak_index=2,
+            search_start_index=0,
+            search_end_index=4,
+        )
+
+        self.assertIsNone(repaired)
+
     def test_rejects_when_peak_has_no_positive_zero_crossing_lobe(self) -> None:
         times = np.array([0.0, 0.1, 0.2])
         data = np.array([-1.0, -0.5, -1.0])

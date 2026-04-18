@@ -485,15 +485,21 @@ class VideoFrameViewer(QMainWindow):
               <li><b>Bulk auto_repair</b>: repair all annotations in memory. This does <b>not</b> save automatically.</li>
               <li>Bulk auto_repair never merges annotations. Each annotation remains separate.</li>
               <li><b>Right-click &gt; Revert auto_repair</b>: restore that annotation's original onset/duration.</li>
+              <li><b>Revert all auto_repair</b>: restore every auto-repaired annotation to its original bounds.</li>
             </ul>
 
             <h3>Bulk Auto Repair Review</h3>
             <ul>
               <li><b>Blue annotation</b>: auto-repaired; revert is available.</li>
+              <li><b>SPLIT boundary used</b> in the tooltip/status means one side had no safe
+                  zero crossing before the neighboring blink, so the boundary was kept at the
+                  split point instead of borrowing the neighbor's crossing.</li>
               <li><b>Yellow annotation with red border</b>: auto-repaired and overlaps another annotation;
                   review before saving.</li>
               <li>The status line reports changed, already aligned, failed, deleted, merged, and overlap-review counts.</li>
               <li>Current auto repair does not automatically delete or merge annotations. Overlaps are marked only for review.</li>
+              <li>If an expanded annotation covers a neighbor and is hard to inspect, click
+                  <b>Revert all auto_repair</b> before saving.</li>
             </ul>
 
             <h3>Status Dropdown</h3>

@@ -74,7 +74,7 @@ ANNOTATION_NUDGE_FPS = 30.0
 LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(eq=False)
 class Annotation:
     onset: float
     duration: float
@@ -249,6 +249,9 @@ class TimeSeriesViewer(QWidget):
         self.bulk_auto_repair_button = QPushButton("Bulk auto_repair")
         self.bulk_auto_repair_button.clicked.connect(self.bulk_auto_repair_annotations)
         left_layout.addWidget(self.bulk_auto_repair_button)
+        self.revert_all_auto_repair_button = QPushButton("Revert all auto_repair")
+        self.revert_all_auto_repair_button.clicked.connect(self.revert_all_auto_repair)
+        left_layout.addWidget(self.revert_all_auto_repair_button)
         left_controls.setLayout(left_layout)
 
         center_controls = QWidget()
@@ -1179,7 +1182,7 @@ class TimeSeriesViewer(QWidget):
         try:
             for items in self._annotation_items_by_widget.values():
                 for item in items:
-                    if item.annotation != annotation or item.region is skip_region:
+                    if item.annotation is not annotation or item.region is skip_region:
                         continue
                     item.region.setRegion([onset, end])
         finally:
@@ -1216,7 +1219,7 @@ class TimeSeriesViewer(QWidget):
             return
 
         self._store_auto_repair_original_bounds(annotation)
-        onset, duration, peak_time = result
+        onset, duration, peak_time, used_split_boundary = result
         unchanged = math.isclose(annotation.onset, onset) and math.isclose(
             annotation.duration, duration
         )
@@ -1225,7 +1228,7 @@ class TimeSeriesViewer(QWidget):
         self._sync_annotation_regions(annotation, onset, duration)
         self._set_selected_annotation(annotation, announce=False)
         self._set_annotations_dirty(True)
-        self._mark_auto_repaired(annotation)
+        self._mark_auto_repaired(annotation, used_split_boundary=used_split_boundary)
         if unchanged:
             self.status_label.setText(
                 "Auto_repair checked annotation; bounds were already aligned "
@@ -1254,21 +1257,26 @@ class TimeSeriesViewer(QWidget):
         failed_count = 0
         unchanged_count = 0
         last_repaired: Optional[Annotation] = None
+        annotation_bounds = self._annotation_bounds_snapshot()
         try:
             for checked_count, annotation in enumerate(list(self._annotations), start=1):
-                result = self._auto_repair_bounds(annotation)
+                result = self._auto_repair_bounds(
+                    annotation, annotation_bounds=annotation_bounds
+                )
                 if result is None:
                     failed_count += 1
                 else:
                     self._store_auto_repair_original_bounds(annotation)
-                    onset, duration, _peak_time = result
+                    onset, duration, _peak_time, used_split_boundary = result
                     unchanged = math.isclose(annotation.onset, onset) and math.isclose(
                         annotation.duration, duration
                     )
                     annotation.onset = onset
                     annotation.duration = duration
                     self._sync_annotation_regions(annotation, onset, duration)
-                    self._mark_auto_repaired(annotation)
+                    self._mark_auto_repaired(
+                        annotation, used_split_boundary=used_split_boundary
+                    )
                     if unchanged:
                         unchanged_count += 1
                     else:
@@ -1330,8 +1338,38 @@ class TimeSeriesViewer(QWidget):
             f"Reverted annotation to {onset:.3f}s-{onset + duration:.3f}s."
         )
 
-    def _mark_auto_repaired(self, annotation: Annotation) -> None:
-        self._auto_repair_notes[id(annotation)] = "AUTO_REPAIRED - revert available"
+    def revert_all_auto_repair(self) -> None:
+        """Restore all annotations that have auto-repair history."""
+
+        if not self._auto_repair_original_bounds:
+            self.status_label.setText("No auto_repair history to revert.")
+            return
+
+        reverted_count = 0
+        for annotation in list(self._annotations):
+            original = self._auto_repair_original_bounds.pop(id(annotation), None)
+            if original is None:
+                continue
+            onset, duration = original
+            annotation.onset = onset
+            annotation.duration = duration
+            self._auto_repair_notes.pop(id(annotation), None)
+            self._sync_annotation_regions(annotation, onset, duration)
+            self._refresh_annotation_visuals(annotation)
+            reverted_count += 1
+
+        self._set_annotations_dirty(True)
+        self.status_label.setText(
+            f"Reverted {reverted_count} auto_repaired annotation(s) to original bounds."
+        )
+
+    def _mark_auto_repaired(
+        self, annotation: Annotation, used_split_boundary: bool = False
+    ) -> None:
+        note = "AUTO_REPAIRED - revert available"
+        if used_split_boundary:
+            note = f"{note}; SPLIT boundary used"
+        self._auto_repair_notes[id(annotation)] = note
         self._refresh_annotation_visuals(annotation)
 
     def _mark_auto_repair_overlaps(self) -> int:
@@ -1370,8 +1408,10 @@ class TimeSeriesViewer(QWidget):
         return f"{annotation.description}\n{note}"
 
     def _auto_repair_bounds(
-        self, annotation: Annotation
-    ) -> Optional[tuple[float, float, float]]:
+        self,
+        annotation: Annotation,
+        annotation_bounds: Optional[list[tuple[Annotation, float, float]]] = None,
+    ) -> Optional[tuple[float, float, float, bool]]:
         if self.raw is None or self._times is None or self._times.size == 0:
             self.status_label.setText("No EEG time series loaded for auto_repair.")
             return None
@@ -1410,16 +1450,70 @@ class TimeSeriesViewer(QWidget):
 
         valid_indices = np.nonzero(finite_mask)[0] + start_sample
         peak_index = int(valid_indices[np.argmax(channel_data[valid_indices])])
-        repaired = self._repair_bounds_from_peak(channel_times, channel_data, peak_index)
+        search_start, search_end = self._auto_repair_search_sample_bounds(
+            annotation,
+            channel_times,
+            peak_index,
+            annotation_bounds=annotation_bounds,
+        )
+        repaired = self._repair_bounds_from_peak(
+            channel_times,
+            channel_data,
+            peak_index,
+            search_start_index=search_start,
+            search_end_index=search_end,
+            allow_split_boundary=True,
+        )
         if repaired is None:
             self.status_label.setText(
-                "Could not find upward and downward zero crossings for auto_repair."
+                "Could not repair annotation inside neighboring blink boundaries."
             )
             return None
 
-        repaired_start, repaired_end, peak_time = repaired
+        repaired_start, repaired_end, peak_time, used_split_boundary = repaired
         onset, duration = self._normalize_region_values(repaired_start, repaired_end)
-        return onset, duration, peak_time
+        return onset, duration, peak_time, used_split_boundary
+
+    def _annotation_bounds_snapshot(self) -> list[tuple[Annotation, float, float]]:
+        return [
+            (annotation, annotation.onset, annotation.onset + annotation.duration)
+            for annotation in self._annotations
+        ]
+
+    def _auto_repair_search_sample_bounds(
+        self,
+        annotation: Annotation,
+        times: np.ndarray,
+        peak_index: int,
+        annotation_bounds: Optional[list[tuple[Annotation, float, float]]] = None,
+    ) -> tuple[int, int]:
+        bounds = annotation_bounds or self._annotation_bounds_snapshot()
+        peak_time = float(times[peak_index])
+        left_limit = 0.0
+        right_limit = float(times[-1])
+
+        for other, other_start, other_end in bounds:
+            if other is annotation:
+                continue
+            other_center = (other_start + other_end) / 2.0
+            if other_end <= peak_time:
+                midpoint = (peak_time + other_center) / 2.0
+                left_limit = max(left_limit, other_end, midpoint)
+            elif other_start >= peak_time:
+                midpoint = (peak_time + other_center) / 2.0
+                right_limit = min(right_limit, other_start, midpoint)
+            elif other_center < peak_time:
+                midpoint = (peak_time + other_center) / 2.0
+                left_limit = max(left_limit, midpoint)
+            else:
+                midpoint = (peak_time + other_center) / 2.0
+                right_limit = min(right_limit, midpoint)
+
+        search_start = int(np.searchsorted(times, left_limit, side="left"))
+        search_end = int(np.searchsorted(times, right_limit, side="right")) - 1
+        search_start = max(0, min(search_start, peak_index))
+        search_end = min(times.size - 1, max(search_end, peak_index))
+        return search_start, search_end
 
     @staticmethod
     def _repair_bounds_from_samples(
@@ -1433,8 +1527,13 @@ class TimeSeriesViewer(QWidget):
 
     @staticmethod
     def _repair_bounds_from_peak(
-        times: np.ndarray, data: np.ndarray, peak_index: int
-    ) -> Optional[tuple[float, float, float]]:
+        times: np.ndarray,
+        data: np.ndarray,
+        peak_index: int,
+        search_start_index: int = 0,
+        search_end_index: Optional[int] = None,
+        allow_split_boundary: bool = False,
+    ) -> Optional[tuple[float, float, float] | tuple[float, float, float, bool]]:
         if (
             times.size == 0
             or data.size == 0
@@ -1447,42 +1546,60 @@ class TimeSeriesViewer(QWidget):
         if data[peak_index] <= 0:
             return None
 
+        if search_end_index is None:
+            search_end_index = data.size - 1
+        search_start_index = max(0, min(search_start_index, peak_index))
+        search_end_index = min(data.size - 1, max(search_end_index, peak_index))
+
         left_crossing = TimeSeriesViewer._nearest_upward_zero_crossing(
-            times, data, peak_index
+            times, data, peak_index, search_start_index
         )
         right_crossing = TimeSeriesViewer._nearest_downward_zero_crossing(
-            times, data, peak_index
+            times, data, peak_index, search_end_index
         )
+        used_split_boundary = False
+        if allow_split_boundary:
+            if left_crossing is None:
+                left_crossing = float(times[search_start_index])
+                used_split_boundary = True
+            if right_crossing is None:
+                right_crossing = float(times[search_end_index])
+                used_split_boundary = True
+
         if left_crossing is None or right_crossing is None or right_crossing <= left_crossing:
             return None
 
+        if allow_split_boundary:
+            return left_crossing, right_crossing, float(times[peak_index]), used_split_boundary
         return left_crossing, right_crossing, float(times[peak_index])
 
     @staticmethod
     def _nearest_upward_zero_crossing(
-        times: np.ndarray, data: np.ndarray, peak_index: int
+        times: np.ndarray, data: np.ndarray, peak_index: int, search_start_index: int = 0
     ) -> Optional[float]:
-        for index in range(peak_index, 0, -1):
+        start = max(0, min(search_start_index, peak_index))
+        for index in range(peak_index, max(start, 1) - 1, -1):
             left = float(data[index - 1])
             right = float(data[index])
             if left <= 0.0 < right:
                 return TimeSeriesViewer._interpolated_zero_time(
                     float(times[index - 1]), left, float(times[index]), right
                 )
-        return float(times[0]) if data[0] == 0.0 else None
+        return float(times[start]) if data[start] == 0.0 else None
 
     @staticmethod
     def _nearest_downward_zero_crossing(
-        times: np.ndarray, data: np.ndarray, peak_index: int
+        times: np.ndarray, data: np.ndarray, peak_index: int, search_end_index: int
     ) -> Optional[float]:
-        for index in range(peak_index + 1, data.size):
+        end = min(data.size - 1, max(search_end_index, peak_index))
+        for index in range(peak_index + 1, end + 1):
             left = float(data[index - 1])
             right = float(data[index])
             if left > 0.0 >= right:
                 return TimeSeriesViewer._interpolated_zero_time(
                     float(times[index - 1]), left, float(times[index]), right
                 )
-        return float(times[-1]) if data[-1] == 0.0 else None
+        return float(times[end]) if data[end] == 0.0 else None
 
     @staticmethod
     def _interpolated_zero_time(
@@ -1518,7 +1635,7 @@ class TimeSeriesViewer(QWidget):
 
         for items in self._annotation_items_by_widget.values():
             for item in items:
-                if item.annotation != annotation:
+                if item.annotation is not annotation:
                     continue
                 item.region.setToolTip(self._annotation_tooltip(annotation))
                 item.region.setBrush(pg.mkBrush(brush_color))
@@ -1621,13 +1738,13 @@ class TimeSeriesViewer(QWidget):
             if widget is self.plot_widget:
                 continue
             for lane_item in list(items):
-                if lane_item.annotation == annotation_item.annotation:
+                if lane_item.annotation is annotation_item.annotation:
                     widget.removeItem(lane_item.region)
                     items.remove(lane_item)
         self._set_annotations_dirty(True)
         self._update_annotation_filter_options()
         self.status_label.setText("Annotation deleted.")
-        if self._selected_annotation == annotation_item.annotation:
+        if self._selected_annotation is annotation_item.annotation:
             self._selected_annotation = None
 
     def _remove_annotation_regions(self, annotation: Annotation) -> None:
