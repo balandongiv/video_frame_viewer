@@ -794,11 +794,19 @@ class Murat2018Viewer(QMainWindow):
             self.time_series_viewer.jump_to_previous_annotation
         )
 
+        self.delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
+        self.delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.delete_annotation_shortcut.activated.connect(self._delete_annotation_if_allowed)
+
         self.time_series_viewer.annotation_jump_requested.connect(self._on_annotation_jump)
 
     def _step_if_allowed(self, direction: int) -> None:
         if self._shortcut_allowed():
             self._step_time(direction)
+
+    def _delete_annotation_if_allowed(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.delete_selected_annotation()
 
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()

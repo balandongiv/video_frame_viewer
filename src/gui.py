@@ -461,6 +461,7 @@ class VideoFrameViewer(QMainWindow):
               <tr><td>[ or B</td><td>Go back to previous annotation.</td></tr>
               <tr><td>] or N</td><td>Go to next annotation and center on EAR minimum.</td></tr>
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
+              <tr><td>D</td><td>Delete the selected annotation.</td></tr>
               <tr><td>Ctrl + S</td><td>Save annotations.</td></tr>
             </table>
 
@@ -468,6 +469,7 @@ class VideoFrameViewer(QMainWindow):
             <ul>
               <li>Ctrl + left-drag on the main time-series plot to create an annotation.</li>
               <li>Drag annotation boundaries to manually adjust onset/duration.</li>
+              <li>Press <b>D</b> to delete the selected annotation.</li>
               <li>Right-click an annotation for <b>Edit label</b>, <b>auto_repair</b>,
                   <b>Revert auto_repair</b>, or <b>Delete annotation</b>.</li>
               <li>The <b>Unsaved changes</b> label means annotations changed in memory but are not saved yet.</li>
@@ -1447,6 +1449,10 @@ class VideoFrameViewer(QMainWindow):
             self._handle_auto_repair_annotation_shortcut
         )
 
+        delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
+        delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        delete_annotation_shortcut.activated.connect(self._handle_delete_annotation_shortcut)
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
@@ -1460,6 +1466,7 @@ class VideoFrameViewer(QMainWindow):
         self.previous_annotation_letter = previous_annotation_letter
         self.save_annotations_shortcut = save_annotations_shortcut
         self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
+        self.delete_annotation_shortcut = delete_annotation_shortcut
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -1488,9 +1495,13 @@ class VideoFrameViewer(QMainWindow):
         if self._shortcut_allowed():
             self.time_series_viewer.auto_repair_selected_annotation()
 
+    def _handle_delete_annotation_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.delete_selected_annotation()
+
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()
-        return not isinstance(focus_widget, (QLineEdit, QSpinBox))
+        return not isinstance(focus_widget, (QLineEdit, QSpinBox, QTextBrowser, QTextEdit))
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_session_state()

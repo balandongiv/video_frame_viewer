@@ -1806,6 +1806,21 @@ class TimeSeriesViewer(QWidget):
         if self._selected_annotation is annotation_item.annotation:
             self._selected_annotation = None
 
+    def delete_selected_annotation(self) -> None:
+        """Delete the currently selected annotation, if one is selected."""
+
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation before deleting.")
+            return
+
+        annotation = self._selected_annotation
+        for annotation_item in self._annotation_items_by_widget.get(self.plot_widget, []):
+            if annotation_item.annotation is annotation:
+                self._delete_annotation(annotation_item)
+                return
+
+        self.status_label.setText("Selected annotation is not available to delete.")
+
     def _remove_annotation_regions(self, annotation: Annotation) -> None:
         for widget, items in self._annotation_items_by_widget.items():
             for item in list(items):

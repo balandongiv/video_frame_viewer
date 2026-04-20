@@ -88,6 +88,7 @@ The application automatically saves your progress for each video context to a fi
 | :--- | :--- |
 | **Create Annotation** | **Ctrl + Left Click & Drag** on the time-series plot |
 | **Edit/Delete** | **Right Click** on an annotation region |
+| **Delete Selected Annotation** | **D** |
 | **Save Changes** | **Ctrl + S** (saves to `ear_eog.csv`) |
 
 ### Zoom & View
