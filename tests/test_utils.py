@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from utils import find_md_mff_videos, is_md_mff_video, seconds_to_frame_index
+from utils import (
+    find_md_mff_videos,
+    is_md_mff_video,
+    seconds_to_frame_index,
+    subject_label_sort_key,
+)
 
 
 class SecondsToFrameIndexTests(unittest.TestCase):
@@ -57,6 +62,16 @@ class MdMffVideoTests(unittest.TestCase):
             self.assertIn(nested_match, results)
             self.assertIn(md_dir_match, results)
             self.assertNotIn(non_matching, results)
+
+
+class SubjectSortTests(unittest.TestCase):
+    def test_sorts_subject_labels_by_integer_suffix(self) -> None:
+        subjects = ["S1", "S10", "S2", "S4", "S3"]
+
+        self.assertEqual(
+            sorted(subjects, key=subject_label_sort_key),
+            ["S1", "S2", "S3", "S4", "S10"],
+        )
 
 
 if __name__ == "__main__":

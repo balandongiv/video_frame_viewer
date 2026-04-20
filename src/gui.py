@@ -45,6 +45,7 @@ from utils import (
     find_mov_videos,
     frame_to_pixmap,
     seconds_to_frame_index,
+    subject_label_sort_key,
     subject_sort_key,
 )
 from video_handler import VideoHandler
@@ -1346,7 +1347,7 @@ class VideoFrameViewer(QMainWindow):
     def _update_summary_table(self) -> None:
         subjects = sorted(
             self.summary_subject_counts.keys(),
-            key=lambda item: (item == "Unknown", item),
+            key=lambda item: (item == "Unknown", subject_label_sort_key(item)),
         )
         self.summary_table.setRowCount(len(subjects))
 

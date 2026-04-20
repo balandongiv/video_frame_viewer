@@ -123,3 +123,12 @@ def subject_sort_key(path: Path) -> tuple[int, str]:
     if label is not None:
         return (int(label[1:]), str(path).lower())
     return (1_000_000, str(path).lower())
+
+
+def subject_label_sort_key(label: str) -> tuple[int, int, str]:
+    """Sort subject labels like S1, S2, S10 by their numeric suffix."""
+
+    match = re.fullmatch(r"s(\d+)", label, re.IGNORECASE)
+    if match:
+        return (0, int(match.group(1)), label.lower())
+    return (1, 1_000_000, label.lower())
