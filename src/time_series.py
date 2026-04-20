@@ -39,9 +39,8 @@ from PyQt5.QtWidgets import (
 
 from paths import derive_annotation_path, derive_time_series_path
 
-PRIMARY_CHANNEL = "EEG-E8"
+DEFAULT_PRIMARY_CHANNEL = "EEG-E8"
 EAR_AVG_CHANNEL = "EAR-avg_ear"
-DEFAULT_VISIBLE_CHANNELS = {PRIMARY_CHANNEL, EAR_AVG_CHANNEL}
 TARGET_PLOT_UNIT = "µV"
 UNIT_SCALE_FACTORS = {
     "v": 1e6,
@@ -107,6 +106,7 @@ class TimeSeriesViewer(QWidget):
         self.raw: Optional[mne.io.BaseRaw] = None
         self._times: Optional[np.ndarray] = None
         self._selected_channels: Set[str] = set()
+        self._primary_channel = DEFAULT_PRIMARY_CHANNEL
         self._last_cursor_time: float = 0.0
         self.default_view_span_seconds: float = 5.0
         self.view_span_seconds: float = self.default_view_span_seconds
@@ -166,8 +166,14 @@ class TimeSeriesViewer(QWidget):
         self.zoom_reset_button = QPushButton("Reset Zoom")
         self.zoom_reset_button.clicked.connect(self._reset_zoom)
         self.zoom_label = QLabel(self._zoom_label_text())
+        self.primary_channel_combo = QComboBox()
+        self.primary_channel_combo.currentIndexChanged.connect(
+            self._on_primary_channel_changed
+        )
 
         control_row.addWidget(self.show_all_checkbox)
+        control_row.addWidget(QLabel("EEG plot:"))
+        control_row.addWidget(self.primary_channel_combo)
         control_row.addWidget(self.zoom_out_button)
         control_row.addWidget(self.zoom_in_button)
         control_row.addWidget(self.zoom_reset_button)
@@ -418,6 +424,10 @@ class TimeSeriesViewer(QWidget):
         self._times = None
         self.raw = None
         self._selected_channels.clear()
+        self._primary_channel = DEFAULT_PRIMARY_CHANNEL
+        self.primary_channel_combo.blockSignals(True)
+        self.primary_channel_combo.clear()
+        self.primary_channel_combo.blockSignals(False)
         self.channel_list.clear()
         self._reset_zoom()
         self._last_ts_path = None
@@ -632,11 +642,14 @@ class TimeSeriesViewer(QWidget):
         channel_names: List[str],
         channel_types: List[str],
     ) -> tuple[np.ndarray, List[int], List[str], List[str]]:
-        if PRIMARY_CHANNEL not in channel_names or EAR_AVG_CHANNEL not in channel_names:
+        if (
+            self._primary_channel not in channel_names
+            or EAR_AVG_CHANNEL not in channel_names
+        ):
             return data, picks, channel_names, channel_types
 
         indices = list(range(len(channel_names)))
-        eeg_index = channel_names.index(PRIMARY_CHANNEL)
+        eeg_index = channel_names.index(self._primary_channel)
         ear_index = channel_names.index(EAR_AVG_CHANNEL)
 
         for idx in sorted({eeg_index, ear_index}, reverse=True):
@@ -794,14 +807,17 @@ class TimeSeriesViewer(QWidget):
 
         self.channel_list.blockSignals(True)
         self.show_all_checkbox.blockSignals(True)
+        self.primary_channel_combo.blockSignals(True)
         self.show_all_checkbox.setChecked(False)
         self.channel_list.clear()
+        self._populate_primary_channel_combo()
 
         defaults_present: Set[str] = set()
+        default_visible_channels = {self._primary_channel, EAR_AVG_CHANNEL}
         for name in self.raw.ch_names:
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            is_default = name in DEFAULT_VISIBLE_CHANNELS
+            is_default = name in default_visible_channels
             if is_default:
                 defaults_present.add(name)
             item.setCheckState(Qt.Checked if is_default else Qt.Unchecked)
@@ -809,7 +825,34 @@ class TimeSeriesViewer(QWidget):
 
         self.channel_list.blockSignals(False)
         self.show_all_checkbox.blockSignals(False)
+        self.primary_channel_combo.blockSignals(False)
         self._selected_channels = defaults_present
+
+    def _populate_primary_channel_combo(self) -> None:
+        if self.raw is None:
+            return
+
+        self.primary_channel_combo.clear()
+        channel_types = self.raw.get_channel_types()
+        eeg_channels = [
+            name
+            for name, channel_type in zip(self.raw.ch_names, channel_types)
+            if channel_type == "eeg" or name.upper().startswith("EEG-")
+        ]
+        if not eeg_channels:
+            eeg_channels = list(self.raw.ch_names)
+
+        selected_channel = (
+            self._primary_channel
+            if self._primary_channel in eeg_channels
+            else DEFAULT_PRIMARY_CHANNEL
+            if DEFAULT_PRIMARY_CHANNEL in eeg_channels
+            else eeg_channels[0]
+        )
+        self._primary_channel = selected_channel
+
+        self.primary_channel_combo.addItems(eeg_channels)
+        self.primary_channel_combo.setCurrentText(selected_channel)
 
     def _channel_indices(self) -> List[int]:
         if self.raw is None:
@@ -839,6 +882,35 @@ class TimeSeriesViewer(QWidget):
             self._selected_channels.discard(name)
         if not self.show_all_checkbox.isChecked():
             self._replot()
+
+    def _on_primary_channel_changed(self, index: int) -> None:
+        if self.raw is None or index < 0:
+            return
+
+        previous_channel = self._primary_channel
+        selected_channel = self.primary_channel_combo.currentText()
+        if not selected_channel or selected_channel == previous_channel:
+            return
+
+        self._primary_channel = selected_channel
+        if previous_channel in self._selected_channels:
+            self._selected_channels.discard(previous_channel)
+            self._set_channel_checked(previous_channel, False)
+        self._selected_channels.add(selected_channel)
+        self._set_channel_checked(selected_channel, True)
+        if not self.show_all_checkbox.isChecked():
+            self._replot()
+
+    def _set_channel_checked(self, channel_name: str, checked: bool) -> None:
+        self.channel_list.blockSignals(True)
+        try:
+            for index in range(self.channel_list.count()):
+                item = self.channel_list.item(index)
+                if item.text() == channel_name:
+                    item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                    return
+        finally:
+            self.channel_list.blockSignals(False)
 
     def _checked_channel_names(self) -> Set[str]:
         names: Set[str] = set()
@@ -960,7 +1032,7 @@ class TimeSeriesViewer(QWidget):
         return self._annotation_colors[description]
 
     def _pen_for_channel(self, channel_name: str, index: int) -> pg.Pen:
-        if channel_name == PRIMARY_CHANNEL:
+        if channel_name == self._primary_channel:
             return pg.mkPen(CHANNEL_PALETTE[0], width=1.5)
 
         palette_index = (index + 1) % len(CHANNEL_PALETTE)
@@ -1476,9 +1548,11 @@ class TimeSeriesViewer(QWidget):
             return None
 
         try:
-            channel_index = self.raw.ch_names.index(PRIMARY_CHANNEL)
+            channel_index = self.raw.ch_names.index(self._primary_channel)
         except ValueError:
-            self.status_label.setText(f"{PRIMARY_CHANNEL} not available for auto_repair.")
+            self.status_label.setText(
+                f"{self._primary_channel} not available for auto_repair."
+            )
             return None
 
         data_end = float(self._times[-1])
