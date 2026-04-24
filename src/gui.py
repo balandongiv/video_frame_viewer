@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -36,7 +37,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from config import AppConfig
+from config import AppConfig, save_config
 from paths import derive_annotation_path, derive_time_series_path
 from time_series import TimeSeriesViewer
 from utils import (
@@ -134,7 +135,11 @@ class VideoFrameViewer(QMainWindow):
             annotation_root=self.config.annotation_root,
             ui_settings=self.config.ui,
         )
+        self.time_series_viewer.ui_setting_changed.connect(self._save_ui_setting)
         self.use_test_data = False
+
+        self._annotation_play_timer = QTimer(self)
+        self._annotation_play_timer.timeout.connect(self._annotation_play_tick)
 
         self._setup_ui()
         self._setup_shortcuts()
@@ -144,6 +149,17 @@ class VideoFrameViewer(QMainWindow):
         )
         self._update_navigation_state(False)
         self._initialize_dataset_root()
+
+    def _save_ui_setting(self, key: str, value: object) -> None:
+        self.config.ui[key] = value
+        try:
+            saved_path = save_config(self.config, self.config_path)
+            self.config_path = saved_path
+        except OSError as exc:
+            self.statusBar().showMessage(
+                f"Could not save UI setting '{key}': {exc}",
+                5000,
+            )
 
     # UI setup
     def _setup_ui(self) -> None:
@@ -462,6 +478,7 @@ class VideoFrameViewer(QMainWindow):
               <tr><td>[ or B</td><td>Go back to previous annotation.</td></tr>
               <tr><td>] or N</td><td>Go to next annotation and center on EAR minimum.</td></tr>
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
+              <tr><td>R</td><td>Auto-repair EOG for the selected annotation.</td></tr>
               <tr><td>D</td><td>Delete the selected annotation.</td></tr>
               <tr><td>Ctrl + S</td><td>Save annotations.</td></tr>
             </table>
@@ -472,19 +489,22 @@ class VideoFrameViewer(QMainWindow):
               <li>Drag annotation boundaries to manually adjust onset/duration.</li>
               <li>Press <b>D</b> to delete the selected annotation.</li>
               <li>Right-click an annotation for <b>Edit label</b>, <b>auto_repair</b>,
-                  <b>Revert auto_repair</b>, or <b>Delete annotation</b>.</li>
+                  <b>auto_repair_eog</b>, <b>Revert auto_repair</b>, or <b>Delete annotation</b>.</li>
               <li>The <b>Unsaved changes</b> label means annotations changed in memory but are not saved yet.</li>
             </ul>
 
             <h3>Auto Repair</h3>
             <p>
-              Auto repair uses the EEG channel <b>EEG-E8</b>. It finds the highest positive EEG peak
-              around the selected annotation, then adjusts the annotation boundaries to the nearest
-              upward zero crossing before the peak and the nearest downward zero crossing after the peak.
+              <b>auto_repair</b> uses <b>EEG-E8</b> with zero crossings.
+              <b>auto_repair_eog</b> uses <b>EOG-EEG-eog_vert_left</b> with the configured
+              threshold value and unit. Choose V, mV, µV, kµV, or nV beside the threshold field;
+              positive thresholds find peaks, and negative thresholds find EOG troughs.
             </p>
             <ul>
               <li><b>Space</b>: repair the currently selected annotation.</li>
+              <li><b>R</b>: run auto_repair_eog on the currently selected annotation.</li>
               <li><b>Right-click &gt; auto_repair</b>: repair the clicked annotation.</li>
+              <li><b>Right-click &gt; auto_repair_eog</b>: repair the clicked annotation using EOG-EEG-eog_vert_left.</li>
               <li><b>Bulk auto_repair</b>: repair all annotations in memory. This does <b>not</b> save automatically.</li>
               <li>Bulk auto_repair never merges annotations. Each annotation remains separate.</li>
               <li><b>Right-click &gt; Revert auto_repair</b>: restore that annotation's original onset/duration.</li>
@@ -584,6 +604,21 @@ class VideoFrameViewer(QMainWindow):
         control_layout.addWidget(QLabel("Segment CSV:"), 5, 0)
         control_layout.addWidget(self.csv_picker_button, 5, 1, 1, 2)
 
+        play_layout = QHBoxLayout()
+        self.play_button = QPushButton("Play Annotations")
+        self.play_button.setCheckable(True)
+        self.play_button.clicked.connect(self._toggle_annotation_play)
+        self.play_speed_spinbox = QDoubleSpinBox()
+        self.play_speed_spinbox.setRange(0.5, 30.0)
+        self.play_speed_spinbox.setValue(2.0)
+        self.play_speed_spinbox.setSingleStep(0.5)
+        self.play_speed_spinbox.setSuffix(" s")
+        self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
+        play_layout.addWidget(self.play_button)
+        play_layout.addWidget(QLabel("Speed:"))
+        play_layout.addWidget(self.play_speed_spinbox)
+        control_layout.addLayout(play_layout, 6, 0, 1, 3)
+
         navigation_layout = QHBoxLayout()
         self.left_button = QPushButton("Left")
         self.right_button = QPushButton("Right")
@@ -595,7 +630,7 @@ class VideoFrameViewer(QMainWindow):
         self.left_jump_button.clicked.connect(self._trigger_left_jump)
         self.right_jump_button.clicked.connect(self._trigger_right_jump)
 
-        control_layout.addLayout(navigation_layout, 6, 0, 1, 3)
+        control_layout.addLayout(navigation_layout, 7, 0, 1, 3)
 
         zoom_layout = QHBoxLayout()
         self.zoom_out_button = QPushButton("Zoom -")
@@ -611,10 +646,10 @@ class VideoFrameViewer(QMainWindow):
         zoom_layout.addWidget(self.zoom_reset_button)
         zoom_layout.addWidget(self.zoom_label)
 
-        control_layout.addLayout(zoom_layout, 7, 0, 1, 3)
+        control_layout.addLayout(zoom_layout, 8, 0, 1, 3)
 
         self.current_frame_label = QLabel("Current frame: -")
-        control_layout.addWidget(self.current_frame_label, 8, 0, 1, 3)
+        control_layout.addWidget(self.current_frame_label, 9, 0, 1, 3)
 
         return control_group
 
@@ -1450,9 +1485,23 @@ class VideoFrameViewer(QMainWindow):
             self._handle_auto_repair_annotation_shortcut
         )
 
+        auto_repair_eog_shortcut = QShortcut(QKeySequence(Qt.Key_R), self)
+        auto_repair_eog_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        auto_repair_eog_shortcut.activated.connect(
+            self._handle_auto_repair_eog_shortcut
+        )
+
         delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
         delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         delete_annotation_shortcut.activated.connect(self._handle_delete_annotation_shortcut)
+
+        play_shortcut = QShortcut(QKeySequence(Qt.Key_P), self)
+        play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        play_shortcut.activated.connect(self._start_annotation_play)
+
+        stop_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        stop_shortcut.activated.connect(self._stop_annotation_play)
 
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
@@ -1467,6 +1516,7 @@ class VideoFrameViewer(QMainWindow):
         self.previous_annotation_letter = previous_annotation_letter
         self.save_annotations_shortcut = save_annotations_shortcut
         self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
+        self.auto_repair_eog_shortcut = auto_repair_eog_shortcut
         self.delete_annotation_shortcut = delete_annotation_shortcut
 
     def _handle_left_shortcut(self) -> None:
@@ -1496,6 +1546,10 @@ class VideoFrameViewer(QMainWindow):
         if self._shortcut_allowed():
             self.time_series_viewer.auto_repair_selected_annotation()
 
+    def _handle_auto_repair_eog_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.auto_repair_selected_annotation_eog()
+
     def _handle_delete_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.delete_selected_annotation()
@@ -1503,6 +1557,31 @@ class VideoFrameViewer(QMainWindow):
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()
         return not isinstance(focus_widget, (QLineEdit, QSpinBox, QTextBrowser, QTextEdit))
+
+    def _toggle_annotation_play(self, checked: bool) -> None:
+        if checked:
+            self._start_annotation_play()
+        else:
+            self._stop_annotation_play()
+
+    def _start_annotation_play(self) -> None:
+        if not self._shortcut_allowed():
+            return
+        interval_ms = int(self.play_speed_spinbox.value() * 1000)
+        self._annotation_play_timer.start(interval_ms)
+        self.play_button.setChecked(True)
+        self.play_button.setText("Stop Annotations")
+
+    def _stop_annotation_play(self) -> None:
+        self._annotation_play_timer.stop()
+        self.play_button.setChecked(False)
+        self.play_button.setText("Play Annotations")
+
+    def _annotation_play_tick(self) -> None:
+        interval_ms = int(self.play_speed_spinbox.value() * 1000)
+        if self._annotation_play_timer.interval() != interval_ms:
+            self._annotation_play_timer.setInterval(interval_ms)
+        self.time_series_viewer.jump_to_next_annotation()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_session_state()

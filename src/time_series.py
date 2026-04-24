@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, List, Optional, Set
 
 import mne
 import numpy as np
@@ -40,11 +40,17 @@ from PyQt5.QtWidgets import (
 from paths import derive_annotation_path, derive_time_series_path
 
 DEFAULT_PRIMARY_CHANNEL = "EEG-E8"
+EOG_REPAIR_CHANNEL = "EOG-EEG-eog_vert_left"
+EOG_REPAIR_LEFT_CHANNEL = "eog_vert_left"
 EAR_AVG_CHANNEL = "EAR-avg_ear"
 TARGET_PLOT_UNIT = "µV"
+DEFAULT_REPAIR_THRESHOLD_UNIT = "µV"
+REPAIR_THRESHOLD_UNITS = ("V", "mV", "µV", "kµV", "nV")
 UNIT_SCALE_FACTORS = {
     "v": 1e6,
     "mv": 1e3,
+    "kµv": 1e3,
+    "kuv": 1e3,
     "uv": 1.0,
     "µv": 1.0,
     "nv": 1e-3,
@@ -90,6 +96,7 @@ class TimeSeriesViewer(QWidget):
     """Widget that renders time series data alongside the video frames."""
 
     annotation_jump_requested = pyqtSignal(float)
+    ui_setting_changed = pyqtSignal(str, object)
     FILTER_ALL = "__all__"
     FILTER_NONE = "__none__"
 
@@ -99,7 +106,7 @@ class TimeSeriesViewer(QWidget):
         parent: Optional[QWidget] = None,
         time_series_root: Optional[Path] = None,
         annotation_root: Optional[Path] = None,
-        ui_settings: Optional[dict[str, float]] = None,
+        ui_settings: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(parent)
         self.max_points = max_points
@@ -107,6 +114,19 @@ class TimeSeriesViewer(QWidget):
         self._times: Optional[np.ndarray] = None
         self._selected_channels: Set[str] = set()
         self._primary_channel = DEFAULT_PRIMARY_CHANNEL
+        self._repair_threshold = (
+            float(ui_settings.get("auto_repair_threshold", 0.0)) if ui_settings else 0.0
+        )
+        self._repair_threshold_unit = self._coerce_repair_threshold_unit(
+            str(ui_settings.get("auto_repair_threshold_unit", DEFAULT_REPAIR_THRESHOLD_UNIT))
+            if ui_settings
+            else DEFAULT_REPAIR_THRESHOLD_UNIT
+        )
+        configured_repair_channel = (
+            str(ui_settings.get("auto_repair_channel", "")) if ui_settings else ""
+        )
+        if configured_repair_channel:
+            self._primary_channel = configured_repair_channel
         self._last_cursor_time: float = 0.0
         self.default_view_span_seconds: float = 5.0
         self.view_span_seconds: float = self.default_view_span_seconds
@@ -158,6 +178,9 @@ class TimeSeriesViewer(QWidget):
         self.channel_list = QListWidget()
         self.channel_list.setMaximumHeight(120)
         self.channel_list.itemChanged.connect(self._on_channel_item_changed)
+        self.channel_list.currentItemChanged.connect(
+            self._on_current_channel_item_changed
+        )
 
         self.zoom_out_button = QPushButton("Zoom -")
         self.zoom_out_button.clicked.connect(lambda: self._adjust_zoom(1.25))
@@ -172,7 +195,7 @@ class TimeSeriesViewer(QWidget):
         )
 
         control_row.addWidget(self.show_all_checkbox)
-        control_row.addWidget(QLabel("EEG plot:"))
+        control_row.addWidget(QLabel("Highlighted channel:"))
         control_row.addWidget(self.primary_channel_combo)
         control_row.addWidget(self.zoom_out_button)
         control_row.addWidget(self.zoom_in_button)
@@ -182,6 +205,26 @@ class TimeSeriesViewer(QWidget):
 
         control_layout.addLayout(control_row)
         control_layout.addWidget(self.channel_list)
+        repair_row = QHBoxLayout()
+        repair_row.addWidget(QLabel("EOG repair threshold:"))
+        self.auto_repair_threshold_spinbox = QDoubleSpinBox()
+        self.auto_repair_threshold_spinbox.setRange(-1.0e9, 1.0e9)
+        self.auto_repair_threshold_spinbox.setDecimals(3)
+        self.auto_repair_threshold_spinbox.setSingleStep(0.1)
+        self.auto_repair_threshold_spinbox.setValue(self._repair_threshold)
+        self.auto_repair_threshold_spinbox.valueChanged.connect(
+            self._on_auto_repair_threshold_changed
+        )
+        self.auto_repair_threshold_unit_combo = QComboBox()
+        self.auto_repair_threshold_unit_combo.addItems(REPAIR_THRESHOLD_UNITS)
+        self.auto_repair_threshold_unit_combo.setCurrentText(self._repair_threshold_unit)
+        self.auto_repair_threshold_unit_combo.currentTextChanged.connect(
+            self._on_auto_repair_threshold_unit_changed
+        )
+        repair_row.addWidget(self.auto_repair_threshold_spinbox)
+        repair_row.addWidget(self.auto_repair_threshold_unit_combo)
+        repair_row.addStretch()
+        control_layout.addLayout(repair_row)
         gain_row = QHBoxLayout()
         self.ear_gain_checkbox = QCheckBox("Boost EAR-avg_ear")
         self.ear_gain_checkbox.stateChanged.connect(self._on_ear_gain_changed)
@@ -642,6 +685,9 @@ class TimeSeriesViewer(QWidget):
         channel_names: List[str],
         channel_types: List[str],
     ) -> tuple[np.ndarray, List[int], List[str], List[str]]:
+        if all(self._is_plot_channel(name) for name in channel_names):
+            return data, picks, channel_names, channel_types
+
         if (
             self._primary_channel not in channel_names
             or EAR_AVG_CHANNEL not in channel_names
@@ -703,7 +749,7 @@ class TimeSeriesViewer(QWidget):
     def _scale_to_target(self, unit: str) -> float:
         if not unit:
             return UNIT_SCALE_FACTORS["v"]
-        normalized = unit.strip().lower().replace("μ", "µ")
+        normalized = self._normalize_unit_key(unit)
         return UNIT_SCALE_FACTORS.get(normalized, UNIT_SCALE_FACTORS["v"])
 
     def _configure_plot_widget(self, widget: pg.PlotWidget) -> None:
@@ -813,11 +859,11 @@ class TimeSeriesViewer(QWidget):
         self._populate_primary_channel_combo()
 
         defaults_present: Set[str] = set()
-        default_visible_channels = {self._primary_channel, EAR_AVG_CHANNEL}
-        for name in self.raw.ch_names:
+        for index in self._channel_indices():
+            name = self.raw.ch_names[index]
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            is_default = name in default_visible_channels
+            is_default = self._is_always_visible_channel(name)
             if is_default:
                 defaults_present.add(name)
             item.setCheckState(Qt.Checked if is_default else Qt.Unchecked)
@@ -833,39 +879,53 @@ class TimeSeriesViewer(QWidget):
             return
 
         self.primary_channel_combo.clear()
-        channel_types = self.raw.get_channel_types()
-        eeg_channels = [
-            name
-            for name, channel_type in zip(self.raw.ch_names, channel_types)
-            if channel_type == "eeg" or name.upper().startswith("EEG-")
+        available_channels = [
+            self.raw.ch_names[index] for index in self._channel_indices()
         ]
-        if not eeg_channels:
-            eeg_channels = list(self.raw.ch_names)
+        if not available_channels:
+            return
 
         selected_channel = (
             self._primary_channel
-            if self._primary_channel in eeg_channels
+            if self._primary_channel in available_channels
             else DEFAULT_PRIMARY_CHANNEL
-            if DEFAULT_PRIMARY_CHANNEL in eeg_channels
-            else eeg_channels[0]
+            if DEFAULT_PRIMARY_CHANNEL in available_channels
+            else available_channels[0]
         )
         self._primary_channel = selected_channel
 
-        self.primary_channel_combo.addItems(eeg_channels)
+        self.primary_channel_combo.addItems(available_channels)
         self.primary_channel_combo.setCurrentText(selected_channel)
 
     def _channel_indices(self) -> List[int]:
         if self.raw is None:
             return []
 
-        if self.show_all_checkbox.isChecked() or not self._selected_channels:
-            return list(range(len(self.raw.ch_names)))
+        indices: List[int] = []
+        for index in self._required_plot_channel_indices():
+            if index is None or index in indices:
+                continue
+            indices.append(index)
+        return indices
+
+    def _required_plot_channel_indices(self) -> list[Optional[int]]:
+        if self.raw is None:
+            return []
 
         return [
-            idx
-            for idx, name in enumerate(self.raw.ch_names)
-            if name in self._selected_channels
+            self._first_channel_index_matching(self._is_ear_plot_channel),
+            self._first_channel_index_matching(self._is_eog_left_plot_channel),
+            self._first_channel_index_matching(self._is_default_eeg_plot_channel),
         ]
+
+    def _first_channel_index_matching(self, matcher) -> Optional[int]:
+        if self.raw is None:
+            return None
+
+        for index, name in enumerate(self.raw.ch_names):
+            if matcher(name):
+                return index
+        return None
 
     def _on_show_all_channels(self, state: int) -> None:
         if state == Qt.Checked:
@@ -876,12 +936,60 @@ class TimeSeriesViewer(QWidget):
 
     def _on_channel_item_changed(self, item: QListWidgetItem) -> None:
         name = item.text()
+        if self._is_always_visible_channel(name) and item.checkState() != Qt.Checked:
+            self._set_channel_checked(name, True)
+            self._selected_channels.add(name)
+            return
         if item.checkState() == Qt.Checked:
             self._selected_channels.add(name)
+            self._set_repair_channel(name)
         else:
             self._selected_channels.discard(name)
         if not self.show_all_checkbox.isChecked():
             self._replot()
+
+    @classmethod
+    def _is_always_visible_channel(cls, channel_name: str) -> bool:
+        return cls._is_plot_channel(channel_name)
+
+    @classmethod
+    def _is_plot_channel(cls, channel_name: str) -> bool:
+        return (
+            cls._is_ear_plot_channel(channel_name)
+            or cls._is_eog_left_plot_channel(channel_name)
+            or cls._is_default_eeg_plot_channel(channel_name)
+        )
+
+    @classmethod
+    def _is_ear_plot_channel(cls, channel_name: str) -> bool:
+        return (
+            channel_name.casefold() == "ear"
+            or cls._channel_name_matches_token(channel_name, EAR_AVG_CHANNEL)
+        )
+
+    @classmethod
+    def _is_eog_left_plot_channel(cls, channel_name: str) -> bool:
+        return cls._channel_name_matches_token(channel_name, EOG_REPAIR_LEFT_CHANNEL)
+
+    @classmethod
+    def _is_default_eeg_plot_channel(cls, channel_name: str) -> bool:
+        return cls._channel_name_matches_token(channel_name, DEFAULT_PRIMARY_CHANNEL)
+
+    @staticmethod
+    def _channel_name_matches_token(channel_name: str, token: str) -> bool:
+        normalized_name = channel_name.casefold()
+        normalized_token = token.casefold()
+        return (
+            normalized_name == normalized_token
+            or normalized_name.endswith(normalized_token)
+        )
+
+    def _on_current_channel_item_changed(
+        self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]
+    ) -> None:
+        if current is None:
+            return
+        self._set_repair_channel(current.text())
 
     def _on_primary_channel_changed(self, index: int) -> None:
         if self.raw is None or index < 0:
@@ -893,13 +1001,46 @@ class TimeSeriesViewer(QWidget):
             return
 
         self._primary_channel = selected_channel
-        if previous_channel in self._selected_channels:
+        self.ui_setting_changed.emit("auto_repair_channel", selected_channel)
+        if (
+            previous_channel in self._selected_channels
+            and not self._is_always_visible_channel(previous_channel)
+        ):
             self._selected_channels.discard(previous_channel)
             self._set_channel_checked(previous_channel, False)
         self._selected_channels.add(selected_channel)
         self._set_channel_checked(selected_channel, True)
         if not self.show_all_checkbox.isChecked():
             self._replot()
+
+    def _set_repair_channel(self, channel_name: str) -> None:
+        if self.raw is None or channel_name == self._primary_channel:
+            return
+        if channel_name not in self.raw.ch_names:
+            return
+        self.primary_channel_combo.setCurrentText(channel_name)
+
+    def _on_auto_repair_threshold_changed(self, value: float) -> None:
+        self._repair_threshold = float(value)
+        self.ui_setting_changed.emit("auto_repair_threshold", self._repair_threshold)
+
+    def _on_auto_repair_threshold_unit_changed(self, unit: str) -> None:
+        self._repair_threshold_unit = self._coerce_repair_threshold_unit(unit)
+        self.ui_setting_changed.emit(
+            "auto_repair_threshold_unit", self._repair_threshold_unit
+        )
+
+    @classmethod
+    def _coerce_repair_threshold_unit(cls, unit: str) -> str:
+        normalized = cls._normalize_unit_key(unit)
+        for label in REPAIR_THRESHOLD_UNITS:
+            if cls._normalize_unit_key(label) == normalized:
+                return label
+        return DEFAULT_REPAIR_THRESHOLD_UNIT
+
+    @staticmethod
+    def _normalize_unit_key(unit: str) -> str:
+        return unit.strip().lower().replace("μ", "µ").replace(" ", "")
 
     def _set_channel_checked(self, channel_name: str, checked: bool) -> None:
         self.channel_list.blockSignals(True)
@@ -1026,6 +1167,8 @@ class TimeSeriesViewer(QWidget):
             self.annotation_count_label.setText(self._annotation_count_text())
 
     def _color_for_description(self, description: str) -> pg.Color:
+        if description == "BAD_SIGNAL_BLINK":
+            return pg.mkColor("#8b0000")
         if description not in self._annotation_colors:
             palette_index = len(self._annotation_colors) % len(ANNOTATION_PALETTE)
             self._annotation_colors[description] = pg.mkColor(ANNOTATION_PALETTE[palette_index])
@@ -1214,7 +1357,10 @@ class TimeSeriesViewer(QWidget):
         self._set_selected_annotation(annotation_item.annotation)
         menu = QMenu(self)
         edit_action = menu.addAction("Edit label")
-        auto_repair_action = menu.addAction("auto_repair")
+        auto_repair_action = menu.addAction(f"auto_repair ({DEFAULT_PRIMARY_CHANNEL})")
+        auto_repair_eog_action = menu.addAction(
+            f"auto_repair_eog ({EOG_REPAIR_CHANNEL})"
+        )
         revert_auto_repair_action = menu.addAction("Revert auto_repair")
         revert_auto_repair_action.setEnabled(
             id(annotation_item.annotation) in self._auto_repair_original_bounds
@@ -1225,6 +1371,8 @@ class TimeSeriesViewer(QWidget):
             self._edit_annotation_description(annotation_item)
         elif selected_action == auto_repair_action:
             self._auto_repair_annotation(annotation_item)
+        elif selected_action == auto_repair_eog_action:
+            self._auto_repair_annotation_eog(annotation_item.annotation)
         elif selected_action == revert_auto_repair_action:
             self._revert_auto_repair(annotation_item.annotation)
         elif selected_action == delete_action:
@@ -1334,21 +1482,74 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText("Annotation label updated.")
 
     def _auto_repair_annotation(self, annotation_item: AnnotationItem) -> None:
-        self._auto_repair_annotation_model(annotation_item.annotation)
+        self._auto_repair_annotation_model(
+            annotation_item.annotation,
+            channel_name=DEFAULT_PRIMARY_CHANNEL,
+            threshold=0.0,
+            mode_label="auto_repair",
+        )
 
     def auto_repair_selected_annotation(self) -> None:
-        """Repair the currently selected annotation using EEG zero crossings."""
+        """Repair the currently selected annotation using the selected repair channel."""
 
         if self._selected_annotation is None:
             self.status_label.setText("Select an annotation before using auto_repair.")
             return
-        self._auto_repair_annotation_model(self._selected_annotation)
+        self._auto_repair_annotation_model(
+            self._selected_annotation,
+            channel_name=DEFAULT_PRIMARY_CHANNEL,
+            threshold=0.0,
+            mode_label="auto_repair",
+        )
 
-    def _auto_repair_annotation_model(self, annotation: Annotation) -> None:
-        result = self._auto_repair_bounds(annotation)
+    def auto_repair_selected_annotation_eog(self) -> None:
+        """Repair the selected annotation using the selected repair channel."""
+
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation before using auto_repair_eog.")
+            return
+        self._auto_repair_annotation_eog(self._selected_annotation)
+
+    def _auto_repair_annotation_eog(self, annotation: Annotation) -> None:
+        mode_label = (
+            "auto_repair_eog "
+            f"({self._repair_threshold:g} {self._repair_threshold_unit})"
+        )
+        result = self._auto_repair_eog_bounds(annotation)
+        if result is None:
+            return
+        self._apply_auto_repair_result(
+            annotation, result, channel_name=EOG_REPAIR_CHANNEL, mode_label=mode_label
+        )
+
+    def _auto_repair_annotation_model(
+        self,
+        annotation: Annotation,
+        channel_name: str,
+        threshold: float,
+        mode_label: str,
+        threshold_unit: str = TARGET_PLOT_UNIT,
+    ) -> None:
+        result = self._auto_repair_bounds(
+            annotation,
+            channel_name=channel_name,
+            threshold=threshold,
+            threshold_unit=threshold_unit,
+        )
         if result is None:
             return
 
+        self._apply_auto_repair_result(
+            annotation, result, channel_name=channel_name, mode_label=mode_label
+        )
+
+    def _apply_auto_repair_result(
+        self,
+        annotation: Annotation,
+        result: tuple[float, float, float, bool],
+        channel_name: str,
+        mode_label: str,
+    ) -> None:
         self._store_auto_repair_original_bounds(annotation)
         onset, duration, peak_time, used_split_boundary = result
         unchanged = math.isclose(annotation.onset, onset) and math.isclose(
@@ -1362,13 +1563,13 @@ class TimeSeriesViewer(QWidget):
         self._mark_auto_repaired(annotation, used_split_boundary=used_split_boundary)
         if unchanged:
             self.status_label.setText(
-                "Auto_repair checked annotation; bounds were already aligned "
-                f"around EEG peak {peak_time:.3f}s."
+                f"{mode_label} checked annotation on {channel_name}; bounds were "
+                f"already aligned around event {peak_time:.3f}s."
             )
         else:
             self.status_label.setText(
-                "Auto-repaired annotation "
-                f"to {onset:.3f}s-{onset + duration:.3f}s around EEG peak {peak_time:.3f}s."
+                f"{mode_label} repaired annotation on {channel_name} "
+                f"to {onset:.3f}s-{onset + duration:.3f}s around event {peak_time:.3f}s."
             )
 
     def bulk_auto_repair_annotations(self) -> None:
@@ -1392,7 +1593,10 @@ class TimeSeriesViewer(QWidget):
         try:
             for checked_count, annotation in enumerate(list(self._annotations), start=1):
                 result = self._auto_repair_bounds(
-                    annotation, annotation_bounds=annotation_bounds
+                    annotation,
+                    annotation_bounds=annotation_bounds,
+                    channel_name=DEFAULT_PRIMARY_CHANNEL,
+                    threshold=0.0,
                 )
                 if result is None:
                     failed_count += 1
@@ -1538,20 +1742,89 @@ class TimeSeriesViewer(QWidget):
             return annotation.description
         return f"{annotation.description}\n{note}"
 
+    def _auto_repair_eog_bounds(
+        self, annotation: Annotation
+    ) -> Optional[tuple[float, float, float, bool]]:
+        if self.raw is None or self._times is None or self._times.size == 0:
+            self.status_label.setText("No time series loaded for auto_repair_eog.")
+            return None
+
+        channel_data = self._eog_repair_data()
+        if channel_data is None:
+            self.status_label.setText(
+                f"{EOG_REPAIR_CHANNEL} source channels not available for auto_repair_eog."
+            )
+            return None
+
+        data_end = float(self._times[-1])
+        start = max(0.0, annotation.onset)
+        end = min(annotation.onset + annotation.duration, data_end)
+        if end <= start:
+            self.status_label.setText("Annotation is empty; auto_repair_eog skipped.")
+            return None
+
+        channel_times = self.raw.times
+        channel_data = self._convert_target_data_to_unit(
+            channel_data, self._repair_threshold_unit
+        )
+        if channel_data.size != channel_times.size:
+            self.status_label.setText(
+                "EOG sample/time mismatch; auto_repair_eog skipped."
+            )
+            return None
+
+        threshold = self._repair_threshold
+        print(
+            f"[EOG_REPAIR] annotation onset={annotation.onset:.6f} "
+            f"duration={annotation.duration:.6f} "
+            f"threshold={threshold:g} unit={self._repair_threshold_unit}"
+        )
+        repaired = self._repair_eog_bounds_from_threshold_segment(
+            channel_times,
+            channel_data,
+            annotation_onset=start,
+            annotation_duration=end - start,
+            threshold=threshold,
+        )
+        if repaired is None:
+            print("[EOG_REPAIR] repair failed: no threshold segment found")
+            self.status_label.setText(
+                f"No local EOG threshold segment crosses {threshold:g} "
+                f"{self._repair_threshold_unit} around the selected annotation."
+            )
+            return None
+
+        repaired_start, repaired_end, event_time = repaired
+        peak_inside = repaired_start <= event_time <= repaired_end
+        print(
+            f"[EOG_REPAIR] left={repaired_start:.4f} right={repaired_end:.4f} "
+            f"peak={event_time:.4f} peak_inside={peak_inside}"
+        )
+        duration = max(0.0, repaired_end - repaired_start)
+        return repaired_start, duration, event_time, False
+
+    def _eog_repair_data(self) -> Optional[np.ndarray]:
+        left_index = self._channel_index_by_name(EOG_REPAIR_LEFT_CHANNEL)
+        if left_index is None:
+            return None
+        return self._repair_channel_data(left_index)
+
     def _auto_repair_bounds(
         self,
         annotation: Annotation,
         annotation_bounds: Optional[list[tuple[Annotation, float, float]]] = None,
+        channel_name: str = DEFAULT_PRIMARY_CHANNEL,
+        threshold: float = 0.0,
+        threshold_unit: str = TARGET_PLOT_UNIT,
     ) -> Optional[tuple[float, float, float, bool]]:
         if self.raw is None or self._times is None or self._times.size == 0:
-            self.status_label.setText("No EEG time series loaded for auto_repair.")
+            self.status_label.setText("No time series loaded for auto_repair.")
             return None
 
-        try:
-            channel_index = self.raw.ch_names.index(self._primary_channel)
-        except ValueError:
+        channel_index = self._channel_index_by_name(channel_name)
+        if channel_index is None:
             self.status_label.setText(
-                f"{self._primary_channel} not available for auto_repair."
+                f"{channel_name} not available for auto_repair."
             )
             return None
 
@@ -1565,24 +1838,31 @@ class TimeSeriesViewer(QWidget):
         start_sample = int(np.searchsorted(self._times, start, side="left"))
         end_sample = int(np.searchsorted(self._times, end, side="right"))
         if end_sample <= start_sample:
-            self.status_label.setText("No EEG samples in annotation; auto_repair skipped.")
+            self.status_label.setText("No channel samples in annotation; auto_repair skipped.")
             return None
 
-        channel_data = self.raw.get_data(picks=[channel_index], verbose="ERROR")[0]
+        channel_data = self._repair_channel_data(channel_index)
+        channel_data = self._convert_target_data_to_unit(channel_data, threshold_unit)
         channel_times = self.raw.times
         if channel_data.size != channel_times.size:
-            self.status_label.setText("EEG sample/time mismatch; auto_repair skipped.")
+            self.status_label.setText("Channel sample/time mismatch; auto_repair skipped.")
             return None
 
         annotation_data = channel_data[start_sample:end_sample]
         annotation_times = channel_times[start_sample:end_sample]
         finite_mask = np.isfinite(annotation_data) & np.isfinite(annotation_times)
         if not np.any(finite_mask):
-            self.status_label.setText("No finite EEG samples in annotation; auto_repair skipped.")
+            self.status_label.setText(
+                "No finite channel samples in annotation; auto_repair skipped."
+            )
             return None
 
         valid_indices = np.nonzero(finite_mask)[0] + start_sample
-        peak_index = int(valid_indices[np.argmax(channel_data[valid_indices])])
+        valid_data = channel_data[valid_indices]
+        if threshold < 0:
+            peak_index = int(valid_indices[np.argmin(valid_data)])
+        else:
+            peak_index = int(valid_indices[np.argmax(valid_data)])
         search_start, search_end = self._auto_repair_search_sample_bounds(
             annotation,
             channel_times,
@@ -1596,16 +1876,259 @@ class TimeSeriesViewer(QWidget):
             search_start_index=search_start,
             search_end_index=search_end,
             allow_split_boundary=True,
+            threshold=threshold,
         )
         if repaired is None:
             self.status_label.setText(
-                "Could not repair annotation inside neighboring blink boundaries."
+                f"Could not repair annotation on {channel_name} inside neighboring "
+                f"blink boundaries using threshold {threshold:g} {threshold_unit}."
             )
             return None
 
         repaired_start, repaired_end, peak_time, used_split_boundary = repaired
         onset, duration = self._normalize_region_values(repaired_start, repaired_end)
         return onset, duration, peak_time, used_split_boundary
+
+    def _channel_index_by_name(self, channel_name: str) -> Optional[int]:
+        if self.raw is None:
+            return None
+        try:
+            return self.raw.ch_names.index(channel_name)
+        except ValueError:
+            pass
+        normalized_target = channel_name.casefold()
+        for index, name in enumerate(self.raw.ch_names):
+            normalized_name = name.casefold()
+            if normalized_name == normalized_target or normalized_name.endswith(
+                normalized_target
+            ):
+                return index
+        return None
+
+    def _repair_channel_data(self, channel_index: int) -> np.ndarray:
+        if self.raw is None:
+            return np.array([])
+
+        channel_data = self.raw.get_data(picks=[channel_index], verbose="ERROR")[0]
+        channel_name = self.raw.ch_names[channel_index]
+        channel_type = self.raw.get_channel_types(picks=[channel_index])[0]
+        if not self._should_normalize_channel(channel_name, channel_type):
+            return channel_data
+
+        orig_units = getattr(self.raw, "_orig_units", {}) or {}
+        scale = self._scale_for_channel(channel_name, channel_index, orig_units)
+        return channel_data * scale
+
+    @classmethod
+    def _convert_target_data_to_unit(cls, data: np.ndarray, unit: str) -> np.ndarray:
+        normalized = cls._normalize_unit_key(unit)
+        scale = UNIT_SCALE_FACTORS.get(
+            normalized, UNIT_SCALE_FACTORS[cls._normalize_unit_key(TARGET_PLOT_UNIT)]
+        )
+        if scale == 0:
+            return data
+        return data / scale
+
+    @staticmethod
+    def _repair_eog_bounds_from_threshold_segment(
+        times: np.ndarray,
+        data: np.ndarray,
+        annotation_onset: float,
+        annotation_duration: float,
+        threshold: float,
+    ) -> Optional[tuple[float, float, float]]:
+        if times.size == 0 or data.size == 0 or times.size != data.size:
+            return None
+
+        finite_times = times[np.isfinite(times)]
+        if finite_times.size == 0:
+            return None
+
+        annotation_start = annotation_onset
+        annotation_end = annotation_onset + max(0.0, annotation_duration)
+        if annotation_end < annotation_start:
+            return None
+
+        sample_interval = TimeSeriesViewer._median_sample_interval(times)
+        threshold_mask = TimeSeriesViewer._eog_threshold_mask(times, data, threshold)
+
+        peak_index = TimeSeriesViewer._eog_peak_anchor_index_for_annotation(
+            times,
+            data,
+            threshold_mask,
+            annotation_start,
+            annotation_end,
+            sample_interval,
+            threshold,
+        )
+        if peak_index is None:
+            return None
+
+        bounds = TimeSeriesViewer._eog_local_event_search_bounds(
+            times,
+            annotation_start,
+            annotation_end,
+            sample_interval,
+        )
+        if bounds is None:
+            return None
+        start_index, end_index = bounds
+
+        segment = TimeSeriesViewer._threshold_segment_containing_index(
+            threshold_mask, peak_index, start_index, end_index
+        )
+        if segment is None:
+            return None
+
+        segment_start, segment_end = segment
+        repaired_start = float(times[segment_start])
+        repaired_end = float(times[segment_end])
+        peak_time = float(times[peak_index])
+        if not repaired_start <= peak_time <= repaired_end:
+            return None
+        return repaired_start, repaired_end, peak_time
+
+    @staticmethod
+    def _median_sample_interval(times: np.ndarray) -> float:
+        finite_times = times[np.isfinite(times)]
+        if finite_times.size < 2:
+            return 0.0
+        diffs = np.diff(finite_times)
+        valid_diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+        if valid_diffs.size == 0:
+            return 0.0
+        return float(np.median(valid_diffs))
+
+    @staticmethod
+    def _eog_threshold_mask(
+        times: np.ndarray, data: np.ndarray, threshold: float
+    ) -> np.ndarray:
+        finite_mask = np.isfinite(times) & np.isfinite(data)
+        tolerance = TimeSeriesViewer._eog_threshold_tolerance(threshold)
+        if threshold < 0:
+            return finite_mask & (data <= threshold + tolerance)
+        return finite_mask & (data >= threshold - tolerance)
+
+    @staticmethod
+    def _eog_threshold_tolerance(threshold: float) -> float:
+        return max(abs(threshold) * 1.0e-4, 1.0e-6)
+
+    @staticmethod
+    def _eog_peak_anchor_index_for_annotation(
+        times: np.ndarray,
+        data: np.ndarray,
+        threshold_mask: np.ndarray,
+        annotation_start: float,
+        annotation_end: float,
+        sample_interval: float,
+        threshold: float,
+    ) -> Optional[int]:
+        bounds = TimeSeriesViewer._eog_peak_anchor_search_bounds(
+            times, annotation_start, annotation_end, sample_interval
+        )
+        if bounds is None:
+            return None
+
+        start_index, end_index = bounds
+        finite_mask = np.isfinite(times[start_index : end_index + 1]) & np.isfinite(
+            data[start_index : end_index + 1]
+        )
+        hit_mask = finite_mask & threshold_mask[start_index : end_index + 1]
+        if not np.any(hit_mask):
+            return None
+
+        valid_offsets = np.nonzero(hit_mask)[0]
+        valid_data = data[start_index : end_index + 1][valid_offsets]
+        if threshold < 0:
+            return int(start_index + valid_offsets[int(np.argmin(valid_data))])
+        return int(start_index + valid_offsets[int(np.argmax(valid_data))])
+
+    @staticmethod
+    def _eog_peak_anchor_search_bounds(
+        times: np.ndarray,
+        annotation_start: float,
+        annotation_end: float,
+        sample_interval: float,
+    ) -> Optional[tuple[int, int]]:
+        if times.size == 0:
+            return None
+
+        duration = max(0.0, annotation_end - annotation_start)
+        tolerance = sample_interval / 2.0 if sample_interval > 0.0 else 0.0
+        if duration <= MIN_ANNOTATION_DURATION + sample_interval:
+            # Extend left by MIN_ANNOTATION_DURATION so the peak is found even
+            # when the annotation onset falls at or after the actual event peak.
+            search_start = annotation_start - MIN_ANNOTATION_DURATION - tolerance
+            search_end = annotation_end + MIN_ANNOTATION_DURATION + tolerance
+        else:
+            search_start = annotation_end - MIN_ANNOTATION_DURATION - tolerance
+            search_end = annotation_end + MIN_ANNOTATION_DURATION + tolerance
+
+        return TimeSeriesViewer._time_window_to_sample_bounds(times, search_start, search_end)
+
+    @staticmethod
+    def _eog_local_event_search_bounds(
+        times: np.ndarray,
+        annotation_start: float,
+        annotation_end: float,
+        sample_interval: float,
+    ) -> Optional[tuple[int, int]]:
+        if times.size == 0:
+            return None
+
+        duration = max(0.0, annotation_end - annotation_start)
+        tolerance = sample_interval / 2.0 if sample_interval > 0.0 else 0.0
+        if duration <= MIN_ANNOTATION_DURATION + sample_interval:
+            # Left bound extended so _threshold_segment_containing_index accepts
+            # a peak that sits slightly before the annotation onset.
+            search_start = annotation_start - MIN_ANNOTATION_DURATION - tolerance
+            search_end = annotation_end + tolerance
+        else:
+            search_start = annotation_end - tolerance
+            search_end = annotation_end + MIN_ANNOTATION_DURATION + tolerance
+
+        return TimeSeriesViewer._time_window_to_sample_bounds(times, search_start, search_end)
+
+    @staticmethod
+    def _time_window_to_sample_bounds(
+        times: np.ndarray, start_time: float, end_time: float
+    ) -> Optional[tuple[int, int]]:
+        finite_times = times[np.isfinite(times)]
+        if finite_times.size == 0:
+            return None
+
+        search_start = max(float(finite_times[0]), start_time)
+        search_end = min(float(finite_times[-1]), end_time)
+        if search_end < search_start:
+            return None
+
+        start_index = int(np.searchsorted(times, search_start, side="left"))
+        end_index = int(np.searchsorted(times, search_end, side="right")) - 1
+        start_index = max(0, min(start_index, times.size - 1))
+        end_index = max(start_index, min(end_index, times.size - 1))
+        return start_index, end_index
+
+    @staticmethod
+    def _threshold_segment_containing_index(
+        mask: np.ndarray, index: int, lower_bound: int, upper_bound: int
+    ) -> Optional[tuple[int, int]]:
+        if (
+            mask.size == 0
+            or index < lower_bound
+            or index > upper_bound
+            or index < 0
+            or index >= mask.size
+            or not bool(mask[index])
+        ):
+            return None
+
+        segment_start = index
+        segment_end = index
+        while segment_start > lower_bound and bool(mask[segment_start - 1]):
+            segment_start -= 1
+        while segment_end < upper_bound and bool(mask[segment_end + 1]):
+            segment_end += 1
+        return segment_start, segment_end
 
     def _annotation_bounds_snapshot(self) -> list[tuple[Annotation, float, float]]:
         return [
@@ -1650,13 +2173,18 @@ class TimeSeriesViewer(QWidget):
 
     @staticmethod
     def _repair_bounds_from_samples(
-        times: np.ndarray, data: np.ndarray
+        times: np.ndarray, data: np.ndarray, threshold: float = 0.0
     ) -> Optional[tuple[float, float, float]]:
         if times.size == 0 or data.size == 0 or times.size != data.size:
             return None
 
-        peak_index = int(np.argmax(data))
-        return TimeSeriesViewer._repair_bounds_from_peak(times, data, peak_index)
+        if threshold < 0:
+            peak_index = int(np.argmin(data))
+        else:
+            peak_index = int(np.argmax(data))
+        return TimeSeriesViewer._repair_bounds_from_peak(
+            times, data, peak_index, threshold=threshold
+        )
 
     @staticmethod
     def _repair_bounds_from_peak(
@@ -1666,6 +2194,7 @@ class TimeSeriesViewer(QWidget):
         search_start_index: int = 0,
         search_end_index: Optional[int] = None,
         allow_split_boundary: bool = False,
+        threshold: float = 0.0,
     ) -> Optional[tuple[float, float, float] | tuple[float, float, float, bool]]:
         if (
             times.size == 0
@@ -1676,7 +2205,11 @@ class TimeSeriesViewer(QWidget):
         ):
             return None
 
-        if data[peak_index] <= 0:
+        negative_event = threshold < 0
+        if negative_event:
+            if data[peak_index] >= threshold:
+                return None
+        elif data[peak_index] <= threshold:
             return None
 
         if search_end_index is None:
@@ -1684,12 +2217,20 @@ class TimeSeriesViewer(QWidget):
         search_start_index = max(0, min(search_start_index, peak_index))
         search_end_index = min(data.size - 1, max(search_end_index, peak_index))
 
-        left_crossing = TimeSeriesViewer._nearest_upward_zero_crossing(
-            times, data, peak_index, search_start_index
-        )
-        right_crossing = TimeSeriesViewer._nearest_downward_zero_crossing(
-            times, data, peak_index, search_end_index
-        )
+        if negative_event:
+            left_crossing = TimeSeriesViewer._nearest_downward_threshold_crossing_left(
+                times, data, peak_index, search_start_index, threshold=threshold
+            )
+            right_crossing = TimeSeriesViewer._nearest_upward_threshold_crossing_right(
+                times, data, peak_index, search_end_index, threshold=threshold
+            )
+        else:
+            left_crossing = TimeSeriesViewer._nearest_upward_zero_crossing(
+                times, data, peak_index, search_start_index, threshold=threshold
+            )
+            right_crossing = TimeSeriesViewer._nearest_downward_zero_crossing(
+                times, data, peak_index, search_end_index, threshold=threshold
+            )
         used_split_boundary = False
         if allow_split_boundary:
             if left_crossing is None:
@@ -1708,39 +2249,87 @@ class TimeSeriesViewer(QWidget):
 
     @staticmethod
     def _nearest_upward_zero_crossing(
-        times: np.ndarray, data: np.ndarray, peak_index: int, search_start_index: int = 0
+        times: np.ndarray,
+        data: np.ndarray,
+        peak_index: int,
+        search_start_index: int = 0,
+        threshold: float = 0.0,
     ) -> Optional[float]:
         start = max(0, min(search_start_index, peak_index))
         for index in range(peak_index, max(start, 1) - 1, -1):
             left = float(data[index - 1])
             right = float(data[index])
-            if left <= 0.0 < right:
-                return TimeSeriesViewer._interpolated_zero_time(
-                    float(times[index - 1]), left, float(times[index]), right
+            if left <= threshold < right:
+                return TimeSeriesViewer._interpolated_threshold_time(
+                    float(times[index - 1]), left, float(times[index]), right, threshold
                 )
-        return float(times[start]) if data[start] == 0.0 else None
+        return float(times[start]) if data[start] == threshold else None
 
     @staticmethod
     def _nearest_downward_zero_crossing(
-        times: np.ndarray, data: np.ndarray, peak_index: int, search_end_index: int
+        times: np.ndarray,
+        data: np.ndarray,
+        peak_index: int,
+        search_end_index: int,
+        threshold: float = 0.0,
     ) -> Optional[float]:
         end = min(data.size - 1, max(search_end_index, peak_index))
         for index in range(peak_index + 1, end + 1):
             left = float(data[index - 1])
             right = float(data[index])
-            if left > 0.0 >= right:
-                return TimeSeriesViewer._interpolated_zero_time(
-                    float(times[index - 1]), left, float(times[index]), right
+            if left > threshold >= right:
+                return TimeSeriesViewer._interpolated_threshold_time(
+                    float(times[index - 1]), left, float(times[index]), right, threshold
                 )
-        return float(times[end]) if data[end] == 0.0 else None
+        return float(times[end]) if data[end] == threshold else None
 
     @staticmethod
-    def _interpolated_zero_time(
-        left_time: float, left_value: float, right_time: float, right_value: float
+    def _nearest_downward_threshold_crossing_left(
+        times: np.ndarray,
+        data: np.ndarray,
+        peak_index: int,
+        search_start_index: int = 0,
+        threshold: float = 0.0,
+    ) -> Optional[float]:
+        start = max(0, min(search_start_index, peak_index))
+        for index in range(peak_index, max(start, 1) - 1, -1):
+            left = float(data[index - 1])
+            right = float(data[index])
+            if left > threshold >= right:
+                return TimeSeriesViewer._interpolated_threshold_time(
+                    float(times[index - 1]), left, float(times[index]), right, threshold
+                )
+        return float(times[start]) if data[start] == threshold else None
+
+    @staticmethod
+    def _nearest_upward_threshold_crossing_right(
+        times: np.ndarray,
+        data: np.ndarray,
+        peak_index: int,
+        search_end_index: int,
+        threshold: float = 0.0,
+    ) -> Optional[float]:
+        end = min(data.size - 1, max(search_end_index, peak_index))
+        for index in range(peak_index + 1, end + 1):
+            left = float(data[index - 1])
+            right = float(data[index])
+            if left <= threshold < right:
+                return TimeSeriesViewer._interpolated_threshold_time(
+                    float(times[index - 1]), left, float(times[index]), right, threshold
+                )
+        return float(times[end]) if data[end] == threshold else None
+
+    @staticmethod
+    def _interpolated_threshold_time(
+        left_time: float,
+        left_value: float,
+        right_time: float,
+        right_value: float,
+        threshold: float = 0.0,
     ) -> float:
         if right_value == left_value:
             return left_time
-        fraction = -left_value / (right_value - left_value)
+        fraction = (threshold - left_value) / (right_value - left_value)
         fraction = max(0.0, min(1.0, fraction))
         return left_time + fraction * (right_time - left_time)
 
@@ -2049,6 +2638,7 @@ class TimeSeriesViewer(QWidget):
                 for annotation in self._annotations
                 if annotation.description
             }
+            | {"BAD_SIGNAL_BLINK"}
         )
         label_combo.addItems(labels)
 
