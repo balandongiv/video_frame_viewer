@@ -101,6 +101,13 @@ class Murat2018Viewer(QMainWindow):
         self.status_value = "Pending"
 
         self.time_series_viewer = TimeSeriesViewer()
+
+        self._annotation_play_timer = QTimer(self)
+        self._annotation_play_timer.timeout.connect(self._annotation_play_tick)
+
+        self._forward_play_timer = QTimer(self)
+        self._forward_play_timer.timeout.connect(self._forward_play_tick)
+
         self._setup_ui()
         self._setup_shortcuts()
         self._update_review_controls(False)
@@ -129,6 +136,14 @@ class Murat2018Viewer(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        QTimer.singleShot(0, self._apply_side_tab_mode)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_side_tab_mode()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
         QTimer.singleShot(0, self._apply_side_tab_mode)
 
     def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
@@ -246,6 +261,37 @@ class Murat2018Viewer(QMainWindow):
         layout.addWidget(QLabel("Status:"), 3, 0)
         layout.addWidget(self.status_dropdown, 3, 1, 1, 2)
         layout.addWidget(self.current_time_label, 4, 0, 1, 3)
+
+        play_layout = QHBoxLayout()
+        self.play_button = QPushButton("Play Annotations")
+        self.play_button.setCheckable(True)
+        self.play_button.clicked.connect(self._toggle_annotation_play)
+        self.play_speed_spinbox = QDoubleSpinBox()
+        self.play_speed_spinbox.setRange(0.5, 30.0)
+        self.play_speed_spinbox.setValue(2.0)
+        self.play_speed_spinbox.setSingleStep(0.5)
+        self.play_speed_spinbox.setSuffix(" s")
+        self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
+        play_layout.addWidget(self.play_button)
+        play_layout.addWidget(QLabel("Speed:"))
+        play_layout.addWidget(self.play_speed_spinbox)
+        layout.addLayout(play_layout, 5, 0, 1, 3)
+
+        forward_play_layout = QHBoxLayout()
+        self.forward_play_button = QPushButton("Forward Play")
+        self.forward_play_button.setCheckable(True)
+        self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
+        self.forward_play_speed_spinbox = QDoubleSpinBox()
+        self.forward_play_speed_spinbox.setRange(0.1, 30.0)
+        self.forward_play_speed_spinbox.setValue(0.5)
+        self.forward_play_speed_spinbox.setSingleStep(0.1)
+        self.forward_play_speed_spinbox.setSuffix(" s")
+        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F to toggle)")
+        forward_play_layout.addWidget(self.forward_play_button)
+        forward_play_layout.addWidget(QLabel("Speed:"))
+        forward_play_layout.addWidget(self.forward_play_speed_spinbox)
+        layout.addLayout(forward_play_layout, 6, 0, 1, 3)
+
         return control_group
 
     def _build_summary_tab(self) -> QWidget:
@@ -564,6 +610,10 @@ class Murat2018Viewer(QMainWindow):
             self.right_button,
             self.save_annotations_button,
             self.status_dropdown,
+            self.play_button,
+            self.play_speed_spinbox,
+            self.forward_play_button,
+            self.forward_play_speed_spinbox,
             self.remark_input,
             self.remark_save_button,
             self.remark_history_label,
@@ -759,6 +809,70 @@ class Murat2018Viewer(QMainWindow):
         for remark in remarks:
             self.remark_history_list.addItem(remark)
 
+    def _toggle_annotation_play(self, checked: bool) -> None:
+        if checked:
+            self._start_annotation_play()
+        else:
+            self._stop_annotation_play()
+
+    def _start_annotation_play(self) -> None:
+        interval_ms = int(self.play_speed_spinbox.value() * 1000)
+        self._annotation_play_timer.start(interval_ms)
+        self.play_button.setChecked(True)
+        self.play_button.setText("Stop Annotations")
+
+    def _stop_annotation_play(self) -> None:
+        self._annotation_play_timer.stop()
+        self.play_button.setChecked(False)
+        self.play_button.setText("Play Annotations")
+
+    def _annotation_play_tick(self) -> None:
+        interval_ms = int(self.play_speed_spinbox.value() * 1000)
+        if self._annotation_play_timer.interval() != interval_ms:
+            self._annotation_play_timer.setInterval(interval_ms)
+        self.time_series_viewer.jump_to_next_annotation()
+
+    def _toggle_forward_play(self) -> None:
+        if self._forward_play_timer.isActive():
+            self._stop_forward_play()
+        else:
+            self._start_forward_play()
+
+    def _toggle_forward_play_button(self, checked: bool) -> None:
+        if checked:
+            self._start_forward_play()
+        else:
+            self._stop_forward_play()
+
+    def _start_forward_play(self) -> None:
+        interval_ms = int(self.forward_play_speed_spinbox.value() * 1000)
+        self._forward_play_timer.start(interval_ms)
+        self.forward_play_button.setChecked(True)
+        self.forward_play_button.setText("Stop Forward")
+        self._set_status("Auto-forward started. Press F or ESC to stop.")
+
+    def _stop_forward_play(self) -> None:
+        self._forward_play_timer.stop()
+        self.forward_play_button.setChecked(False)
+        self.forward_play_button.setText("Forward Play")
+        self._set_status("Auto-forward stopped.")
+
+    def _forward_play_tick(self) -> None:
+        interval_ms = int(self.forward_play_speed_spinbox.value() * 1000)
+        if self._forward_play_timer.interval() != interval_ms:
+            self._forward_play_timer.setInterval(interval_ms)
+        current_time = self.time_series_viewer.current_cursor_time()
+        step = self.step_seconds_input.value()
+        self._goto_time(current_time + step)
+        duration = self.time_series_viewer.signal_duration_seconds()
+        if duration is not None and self.time_series_viewer.current_cursor_time() >= duration:
+            self._stop_forward_play()
+            self._set_status("Auto-forward reached end of recording.")
+
+    def _stop_all_play(self) -> None:
+        self._stop_annotation_play()
+        self._stop_forward_play()
+
     def _setup_shortcuts(self) -> None:
         self.save_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_S), self)
         self.save_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -798,6 +912,18 @@ class Murat2018Viewer(QMainWindow):
         self.delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.delete_annotation_shortcut.activated.connect(self._delete_annotation_if_allowed)
 
+        self.play_shortcut = QShortcut(QKeySequence(Qt.Key_P), self)
+        self.play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.play_shortcut.activated.connect(self._start_annotation_play)
+
+        self.forward_play_shortcut = QShortcut(QKeySequence(Qt.Key_F), self)
+        self.forward_play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.forward_play_shortcut.activated.connect(self._toggle_forward_play)
+
+        self.stop_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.stop_shortcut.activated.connect(self._stop_all_play)
+
         self.time_series_viewer.annotation_jump_requested.connect(self._on_annotation_jump)
 
     def _step_if_allowed(self, direction: int) -> None:
@@ -820,5 +946,6 @@ class Murat2018Viewer(QMainWindow):
         self.status_bar.showMessage(message)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._stop_all_play()
         self._save_session_state()
         super().closeEvent(event)

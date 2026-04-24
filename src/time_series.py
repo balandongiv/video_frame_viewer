@@ -858,12 +858,17 @@ class TimeSeriesViewer(QWidget):
         self.channel_list.clear()
         self._populate_primary_channel_combo()
 
+        channel_indices = self._channel_indices()
+        has_known_channels = any(
+            self._is_always_visible_channel(self.raw.ch_names[i]) for i in channel_indices
+        )
+
         defaults_present: Set[str] = set()
-        for index in self._channel_indices():
+        for index in channel_indices:
             name = self.raw.ch_names[index]
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            is_default = self._is_always_visible_channel(name)
+            is_default = self._is_always_visible_channel(name) if has_known_channels else True
             if is_default:
                 defaults_present.add(name)
             item.setCheckState(Qt.Checked if is_default else Qt.Unchecked)
@@ -901,10 +906,23 @@ class TimeSeriesViewer(QWidget):
         if self.raw is None:
             return []
 
+        required = self._required_plot_channel_indices()
+        has_known = any(
+            index is not None
+            and self._is_always_visible_channel(self.raw.ch_names[index])
+            for index in required
+            if index is not None
+        )
+
         indices: List[int] = []
-        for index in self._required_plot_channel_indices():
+        for index in required:
             if index is None or index in indices:
                 continue
+            # In fallback mode, filter by _selected_channels so unchecking works
+            if not has_known and self._selected_channels:
+                name = self.raw.ch_names[index]
+                if name not in self._selected_channels:
+                    continue
             indices.append(index)
         return indices
 
@@ -912,11 +930,15 @@ class TimeSeriesViewer(QWidget):
         if self.raw is None:
             return []
 
-        return [
+        specific: list[Optional[int]] = [
             self._first_channel_index_matching(self._is_ear_plot_channel),
             self._first_channel_index_matching(self._is_eog_left_plot_channel),
             self._first_channel_index_matching(self._is_default_eeg_plot_channel),
         ]
+        if any(i is not None for i in specific):
+            return specific
+        # No known channel patterns found — fall back to all channels in the file
+        return list(range(len(self.raw.ch_names)))
 
     def _first_channel_index_matching(self, matcher) -> Optional[int]:
         if self.raw is None:

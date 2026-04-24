@@ -405,11 +405,12 @@ class VideoFrameViewer(QMainWindow):
         self.summary_overall_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary_overall_label.setWordWrap(True)
 
-        self.summary_table = QTableWidget(0, 8)
+        self.summary_table = QTableWidget(0, 9)
         self.summary_table.setHorizontalHeaderLabels(
             [
                 "Subject",
                 "Pending",
+                "daphne_check",
                 "Ongoing",
                 "Complete",
                 "complete_eeg",
@@ -540,7 +541,7 @@ class VideoFrameViewer(QMainWindow):
             <h3>Status Dropdown</h3>
             <p>
               Use the status dropdown to mark the current video session:
-              <b>Pending</b>, <b>Ongoing</b>, <b>Complete</b>, <b>complete_eeg</b>, or <b>Issue</b>.
+              <b>Pending</b>, <b>daphne_check</b>, <b>Ongoing</b>, <b>Complete</b>, <b>complete_eeg</b>, or <b>Issue</b>.
             </p>
 
             <h3>Saving</h3>
@@ -607,7 +608,7 @@ class VideoFrameViewer(QMainWindow):
 
         self.status_dropdown = QComboBox()
         self.status_dropdown.addItems(
-            ["Pending", "Ongoing", "Complete", "complete_eeg", "Issue"]
+            ["Pending", "daphne_check", "Ongoing", "Complete", "complete_eeg", "Issue"]
         )
         self.status_dropdown.currentTextChanged.connect(self._on_status_changed)
         control_layout.addWidget(QLabel("Status:"), 4, 0)
@@ -1341,6 +1342,7 @@ class VideoFrameViewer(QMainWindow):
                 subject,
                 {
                     "Pending": 0,
+                    "daphne_check": 0,
                     "Ongoing": 0,
                     "Complete": 0,
                     "complete_eeg": 0,
@@ -1356,6 +1358,7 @@ class VideoFrameViewer(QMainWindow):
 
         totals = {
             "Pending": 0,
+            "daphne_check": 0,
             "Ongoing": 0,
             "Complete": 0,
             "complete_eeg": 0,
@@ -1372,6 +1375,7 @@ class VideoFrameViewer(QMainWindow):
             "Dataset summary: "
             f"{total_videos} video(s) | "
             f"Pending: {totals['Pending']}, "
+            f"daphne_check: {totals['daphne_check']}, "
             f"Ongoing: {totals['Ongoing']}, "
             f"Complete: {totals['Complete']}, "
             f"complete_eeg: {totals['complete_eeg']}, "
@@ -1402,7 +1406,7 @@ class VideoFrameViewer(QMainWindow):
             return "Pending"
 
         status = data.get("status", "Pending")
-        if status not in {"Pending", "Ongoing", "Complete", "complete_eeg", "Issue"}:
+        if status not in {"Pending", "daphne_check", "Ongoing", "Complete", "complete_eeg", "Issue"}:
             return "Pending"
         return status
 
@@ -1418,6 +1422,7 @@ class VideoFrameViewer(QMainWindow):
             values = [
                 subject,
                 str(counts.get("Pending", 0)),
+                str(counts.get("daphne_check", 0)),
                 str(counts.get("Ongoing", 0)),
                 str(counts.get("Complete", 0)),
                 str(counts.get("complete_eeg", 0)),
