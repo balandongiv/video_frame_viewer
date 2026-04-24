@@ -141,6 +141,9 @@ class VideoFrameViewer(QMainWindow):
         self._annotation_play_timer = QTimer(self)
         self._annotation_play_timer.timeout.connect(self._annotation_play_tick)
 
+        self._forward_play_timer = QTimer(self)
+        self._forward_play_timer.timeout.connect(self._forward_play_tick)
+
         self._setup_ui()
         self._setup_shortcuts()
         self.frame_scroll.viewport().installEventFilter(self)
@@ -472,14 +475,23 @@ class VideoFrameViewer(QMainWindow):
             <h3>Shortcuts</h3>
             <table border="1" cellspacing="0" cellpadding="4">
               <tr><th>Shortcut</th><th>Action</th></tr>
+              <tr><td colspan="2"><i>Navigation</i></td></tr>
               <tr><td>Left / Right</td><td>Jump left or right by the configured jump size.</td></tr>
               <tr><td>Ctrl + Left / Ctrl + Right</td><td>Move one frame left or right.</td></tr>
               <tr><td>Ctrl + Shift + Left / Right</td><td>Move by the large step size.</td></tr>
-              <tr><td>[ or B</td><td>Go back to previous annotation.</td></tr>
-              <tr><td>] or N</td><td>Go to next annotation and center on EAR minimum.</td></tr>
+              <tr><td colspan="2"><i>Annotation Navigation</i></td></tr>
+              <tr><td>] or N</td><td>Go to next annotation.</td></tr>
+              <tr><td>Ctrl + N</td><td>Go to next annotation and center on EAR minimum within it.</td></tr>
+              <tr><td>[ or B</td><td>Go to previous annotation.</td></tr>
+              <tr><td colspan="2"><i>Playback</i></td></tr>
+              <tr><td>P</td><td>Start auto-play through annotations (jumps to each annotation in sequence).</td></tr>
+              <tr><td>F</td><td>Toggle auto-forward through the time series (advances by the right jump size at the set speed).</td></tr>
+              <tr><td>ESC</td><td>Stop all active playback (annotation play and forward play).</td></tr>
+              <tr><td colspan="2"><i>Annotation Editing</i></td></tr>
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
               <tr><td>R</td><td>Auto-repair EOG for the selected annotation.</td></tr>
               <tr><td>D</td><td>Delete the selected annotation.</td></tr>
+              <tr><td colspan="2"><i>File</i></td></tr>
               <tr><td>Ctrl + S</td><td>Save annotations.</td></tr>
             </table>
 
@@ -619,6 +631,21 @@ class VideoFrameViewer(QMainWindow):
         play_layout.addWidget(self.play_speed_spinbox)
         control_layout.addLayout(play_layout, 6, 0, 1, 3)
 
+        forward_play_layout = QHBoxLayout()
+        self.forward_play_button = QPushButton("Forward Play")
+        self.forward_play_button.setCheckable(True)
+        self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
+        self.forward_play_speed_spinbox = QDoubleSpinBox()
+        self.forward_play_speed_spinbox.setRange(0.1, 30.0)
+        self.forward_play_speed_spinbox.setValue(0.5)
+        self.forward_play_speed_spinbox.setSingleStep(0.1)
+        self.forward_play_speed_spinbox.setSuffix(" s")
+        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F to toggle)")
+        forward_play_layout.addWidget(self.forward_play_button)
+        forward_play_layout.addWidget(QLabel("Speed:"))
+        forward_play_layout.addWidget(self.forward_play_speed_spinbox)
+        control_layout.addLayout(forward_play_layout, 7, 0, 1, 3)
+
         navigation_layout = QHBoxLayout()
         self.left_button = QPushButton("Left")
         self.right_button = QPushButton("Right")
@@ -630,7 +657,7 @@ class VideoFrameViewer(QMainWindow):
         self.left_jump_button.clicked.connect(self._trigger_left_jump)
         self.right_jump_button.clicked.connect(self._trigger_right_jump)
 
-        control_layout.addLayout(navigation_layout, 7, 0, 1, 3)
+        control_layout.addLayout(navigation_layout, 8, 0, 1, 3)
 
         zoom_layout = QHBoxLayout()
         self.zoom_out_button = QPushButton("Zoom -")
@@ -1499,9 +1526,13 @@ class VideoFrameViewer(QMainWindow):
         play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         play_shortcut.activated.connect(self._start_annotation_play)
 
+        forward_play_shortcut = QShortcut(QKeySequence(Qt.Key_F), self)
+        forward_play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        forward_play_shortcut.activated.connect(self._toggle_forward_play)
+
         stop_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
         stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        stop_shortcut.activated.connect(self._stop_annotation_play)
+        stop_shortcut.activated.connect(self._stop_all_play)
 
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
@@ -1518,6 +1549,7 @@ class VideoFrameViewer(QMainWindow):
         self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
         self.auto_repair_eog_shortcut = auto_repair_eog_shortcut
         self.delete_annotation_shortcut = delete_annotation_shortcut
+        self.forward_play_shortcut = forward_play_shortcut
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -1582,6 +1614,47 @@ class VideoFrameViewer(QMainWindow):
         if self._annotation_play_timer.interval() != interval_ms:
             self._annotation_play_timer.setInterval(interval_ms)
         self.time_series_viewer.jump_to_next_annotation()
+
+    def _toggle_forward_play(self) -> None:
+        if not self._shortcut_allowed():
+            return
+        if self._forward_play_timer.isActive():
+            self._stop_forward_play()
+        else:
+            self._start_forward_play()
+
+    def _toggle_forward_play_button(self, checked: bool) -> None:
+        if checked:
+            self._start_forward_play()
+        else:
+            self._stop_forward_play()
+
+    def _start_forward_play(self) -> None:
+        interval_ms = int(self.forward_play_speed_spinbox.value() * 1000)
+        self._forward_play_timer.start(interval_ms)
+        self.forward_play_button.setChecked(True)
+        self.forward_play_button.setText("Stop Forward")
+        self._set_status("Auto-forward started. Press F or ESC to stop.")
+
+    def _stop_forward_play(self) -> None:
+        self._forward_play_timer.stop()
+        self.forward_play_button.setChecked(False)
+        self.forward_play_button.setText("Forward Play")
+        self._set_status("Auto-forward stopped.")
+
+    def _forward_play_tick(self) -> None:
+        interval_ms = int(self.forward_play_speed_spinbox.value() * 1000)
+        if self._forward_play_timer.interval() != interval_ms:
+            self._forward_play_timer.setInterval(interval_ms)
+        prev_frame = self.current_frame_index
+        self._trigger_right_jump()
+        if self.current_frame_index == prev_frame:
+            self._stop_forward_play()
+            self._set_status("Auto-forward reached end of video.")
+
+    def _stop_all_play(self) -> None:
+        self._stop_annotation_play()
+        self._stop_forward_play()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_session_state()
