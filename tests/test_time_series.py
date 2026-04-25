@@ -475,25 +475,25 @@ class AutoRepairAnnotationTests(unittest.TestCase):
 
     def test_ear_find_left_peak_example_from_spec(self) -> None:
         # Signal from spec: 290, 390, 300, 250, 100, 150, 200, 500, 400
-        # min at index 4; left peak at index 1 (value 390) because data[0]=290 < data[1]=390
+        # min at index 4; 1st left peak at index 1 (value 390) because data[0]=290 < data[1]=390
         data = np.array([290.0, 390.0, 300.0, 250.0, 100.0, 150.0, 200.0, 500.0, 400.0])
-        self.assertEqual(TimeSeriesViewer._ear_find_left_peak_index(data, 4), 1)
+        self.assertEqual(TimeSeriesViewer._ear_find_left_peak_index(data, 4, nth_peak=1), 1)
 
     def test_ear_find_right_peak_example_from_spec(self) -> None:
         # Signal from spec: 290, 390, 300, 250, 100, 150, 200, 500, 400
-        # min at index 4; right peak at index 7 (value 500) because data[8]=400 < data[7]=500
+        # min at index 4; 1st right peak at index 7 (value 500) because data[8]=400 < data[7]=500
         data = np.array([290.0, 390.0, 300.0, 250.0, 100.0, 150.0, 200.0, 500.0, 400.0])
-        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 4), 7)
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 4, nth_peak=1), 7)
 
     def test_ear_find_left_peak_returns_zero_when_no_turn(self) -> None:
         # Monotonically decreasing going leftward: no local maximum before the minimum.
         data = np.array([5.0, 4.0, 3.0, 2.0, 1.0])
-        self.assertEqual(TimeSeriesViewer._ear_find_left_peak_index(data, 4), 0)
+        self.assertEqual(TimeSeriesViewer._ear_find_left_peak_index(data, 4, nth_peak=1), 0)
 
     def test_ear_find_right_peak_returns_last_when_no_turn(self) -> None:
         # Monotonically increasing going rightward: no local maximum after the minimum.
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0), 4)
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0, nth_peak=1), 4)
 
     def test_repair_ear_bounds_from_trough_peak_spec_example(self) -> None:
         # Full spec example: annotation covers entire signal.
@@ -501,7 +501,7 @@ class AutoRepairAnnotationTests(unittest.TestCase):
         times = np.arange(9, dtype=float)
         data = np.array([290.0, 390.0, 300.0, 250.0, 100.0, 150.0, 200.0, 500.0, 400.0])
         repaired = TimeSeriesViewer._repair_ear_bounds_from_trough_peak(
-            times, data, annotation_onset=0.0, annotation_duration=9.0
+            times, data, annotation_onset=0.0, annotation_duration=9.0, nth_peak=1
         )
         self.assertIsNotNone(repaired)
         assert repaired is not None
@@ -515,7 +515,7 @@ class AutoRepairAnnotationTests(unittest.TestCase):
         times = np.arange(7, dtype=float)
         data = np.array([500.0, 300.0, 100.0, 50.0, 100.0, 300.0, 500.0])
         repaired = TimeSeriesViewer._repair_ear_bounds_from_trough_peak(
-            times, data, annotation_onset=2.0, annotation_duration=2.0
+            times, data, annotation_onset=2.0, annotation_duration=2.0, nth_peak=1
         )
         self.assertIsNotNone(repaired)
         assert repaired is not None
@@ -531,6 +531,19 @@ class AutoRepairAnnotationTests(unittest.TestCase):
             times, data, annotation_onset=20.0, annotation_duration=5.0
         )
         self.assertIsNone(result)
+
+    def test_ear_nth_peak_selects_second_and_third_peak(self) -> None:
+        # min at index 0; peaks at indices 2, 5, 8 going right
+        # data: 0, 1, 3, 2, 1, 4, 3, 2, 5, 4
+        data = np.array([0.0, 1.0, 3.0, 2.0, 1.0, 4.0, 3.0, 2.0, 5.0, 4.0])
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0, nth_peak=1), 2)
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0, nth_peak=2), 5)
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0, nth_peak=3), 8)
+
+    def test_ear_nth_peak_returns_boundary_when_not_enough_peaks(self) -> None:
+        # Only 1 peak to the right; asking for 3rd returns last index
+        data = np.array([0.0, 1.0, 3.0, 2.0, 1.0])
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0, nth_peak=3), 4)
 
 
 if __name__ == "__main__":

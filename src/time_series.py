@@ -157,6 +157,9 @@ class TimeSeriesViewer(QWidget):
         self._ear_baseline_value = (
             float(ui_settings.get("ear_baseline", 0.0)) if ui_settings else 0.0
         )
+        self._ear_repair_nth_peak = (
+            int(ui_settings.get("ear_repair_nth_peak", 1)) if ui_settings else 1
+        )
         self._lane_widgets: List[pg.PlotWidget] = []
         self._lane_curves: dict[pg.PlotWidget, List[pg.PlotDataItem]] = {}
         self._lane_cursor_lines: dict[pg.PlotWidget, pg.InfiniteLine] = {}
@@ -261,6 +264,23 @@ class TimeSeriesViewer(QWidget):
         gain_row.addWidget(self.ear_baseline_spinbox)
         gain_row.addStretch()
         control_layout.addLayout(gain_row)
+        ear_repair_row = QHBoxLayout()
+        ear_repair_row.addWidget(QLabel("EAR repair peak number (1=first, 2=second…):"))
+        self.ear_repair_nth_peak_spinbox = QSpinBox()
+        self.ear_repair_nth_peak_spinbox.setRange(1, 20)
+        self.ear_repair_nth_peak_spinbox.setValue(self._ear_repair_nth_peak)
+        self.ear_repair_nth_peak_spinbox.setToolTip(
+            "Which local peak to use as the repair boundary when walking outward from "
+            "the trough. 1 = first peak found, 2 = second peak, 3 = third peak, etc. "
+            "Increase to skip small intermediate peaks and land on a larger, more "
+            "prominent peak further from the trough. Default: 1."
+        )
+        self.ear_repair_nth_peak_spinbox.valueChanged.connect(
+            self._on_ear_repair_nth_peak_changed
+        )
+        ear_repair_row.addWidget(self.ear_repair_nth_peak_spinbox)
+        ear_repair_row.addStretch()
+        control_layout.addLayout(ear_repair_row)
         self._controls_container.setLayout(control_layout)
 
         self.plot_widget = pg.PlotWidget(background="w")
@@ -786,6 +806,10 @@ class TimeSeriesViewer(QWidget):
         for widget, baseline in self._lane_baselines.items():
             if self._lane_baseline_kind.get(widget) == "ear":
                 baseline.setValue(self._ear_baseline_value)
+
+    def _on_ear_repair_nth_peak_changed(self, value: int) -> None:
+        self._ear_repair_nth_peak = int(value)
+        self.ui_setting_changed.emit("ear_repair_nth_peak", self._ear_repair_nth_peak)
 
     def _add_annotations_for_path(self, csv_path: Path) -> None:
         if self._times is None or self._times.size == 0:
@@ -1594,6 +1618,7 @@ class TimeSeriesViewer(QWidget):
             channel_data,
             annotation_onset=start,
             annotation_duration=end - start,
+            nth_peak=self._ear_repair_nth_peak,
         )
         if repaired is None:
             self.status_label.setText(
@@ -2040,38 +2065,44 @@ class TimeSeriesViewer(QWidget):
 
     @staticmethod
     def _ear_find_left_peak_index(
-        data: np.ndarray, min_idx: int, min_separation: int = 1
+        data: np.ndarray, min_idx: int, nth_peak: int = 1
     ) -> int:
-        """Walk left from min_idx to find the first local maximum.
+        """Walk left from min_idx and return the index of the Nth true local maximum.
 
-        A local maximum is where data[i-1] < data[i], meaning the signal rises
-        before index i and falls after (entering the valley). min_separation
-        prevents detecting a peak in the first sample adjacent to the minimum.
-        Returns 0 if no turning point is found.
+        A true local maximum at position i requires the signal to have been rising
+        going leftward (data[i] > data[i+1]) and then falling to the left (data[i-1] < data[i]).
+        nth_peak=1 returns the first such peak, 2 the second, etc.
+        Returns 0 if fewer than nth_peak peaks are found.
         """
+        count = 0
         i = min_idx
         while i > 0:
-            if data[i - 1] < data[i] and (min_idx - i) >= min_separation:
-                return i
+            if data[i - 1] < data[i] and data[i] > data[i + 1]:
+                count += 1
+                if count >= nth_peak:
+                    return i
             i -= 1
         return 0
 
     @staticmethod
     def _ear_find_right_peak_index(
-        data: np.ndarray, min_idx: int, min_separation: int = 1
+        data: np.ndarray, min_idx: int, nth_peak: int = 1
     ) -> int:
-        """Walk right from min_idx to find the first local maximum.
+        """Walk right from min_idx and return the index of the Nth true local maximum.
 
-        A local maximum is where data[i+1] < data[i], meaning the signal rises
-        after the minimum and then starts falling. min_separation prevents
-        detecting a peak in the first sample adjacent to the minimum.
-        Returns the last index if no turning point is found.
+        A true local maximum at position i requires the signal to have been rising
+        going rightward (data[i] > data[i-1]) and then falling to the right (data[i+1] < data[i]).
+        nth_peak=1 returns the first such peak, 2 the second, etc.
+        Returns the last index if fewer than nth_peak peaks are found.
         """
+        count = 0
         i = min_idx
         n = len(data)
         while i < n - 1:
-            if data[i + 1] < data[i] and (i - min_idx) >= min_separation:
-                return i
+            if data[i + 1] < data[i] and (i == min_idx or data[i] > data[i - 1]):
+                count += 1
+                if count >= nth_peak:
+                    return i
             i += 1
         return n - 1
 
@@ -2122,13 +2153,14 @@ class TimeSeriesViewer(QWidget):
         data: np.ndarray,
         annotation_onset: float,
         annotation_duration: float,
+        nth_peak: int = 1,
     ) -> Optional[tuple[float, float, float]]:
         """Find repaired bounds using trough-to-peak walking for EAR-avg_ear.
 
         Finds the minimum amplitude within the annotation window, then walks left
-        and right through the full data to find the first local maximum in each
-        direction. If no turning point is found within the annotation, the search
-        naturally extends beyond the annotation boundaries.
+        and right through the full data counting local maxima. Returns the position
+        of the Nth local maximum in each direction. If fewer than N peaks are found
+        the search naturally extends to the data boundary.
 
         Returns (left_time, right_time, min_time) or None if no finite minimum exists.
         """
@@ -2152,8 +2184,8 @@ class TimeSeriesViewer(QWidget):
         min_idx = start_idx + min_offset
         min_time = float(times[min_idx])
 
-        left_idx = TimeSeriesViewer._ear_find_left_peak_index(data, min_idx)
-        right_idx = TimeSeriesViewer._ear_find_right_peak_index(data, min_idx)
+        left_idx = TimeSeriesViewer._ear_find_left_peak_index(data, min_idx, nth_peak)
+        right_idx = TimeSeriesViewer._ear_find_right_peak_index(data, min_idx, nth_peak)
 
         return float(times[left_idx]), float(times[right_idx]), min_time
 
