@@ -491,7 +491,9 @@ class VideoFrameViewer(QMainWindow):
               <tr><td colspan="2"><i>Annotation Editing</i></td></tr>
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
               <tr><td>R</td><td>Auto-repair EOG for the selected annotation.</td></tr>
+              <tr><td>E</td><td>Auto-repair EAR for the selected annotation (EAR-avg_ear: finds minimum, walks to local peaks).</td></tr>
               <tr><td>D</td><td>Delete the selected annotation.</td></tr>
+              <tr><td>Ctrl + Z</td><td>Undo the last annotation creation (or merge).</td></tr>
               <tr><td colspan="2"><i>File</i></td></tr>
               <tr><td>Ctrl + S</td><td>Save annotations.</td></tr>
             </table>
@@ -502,23 +504,28 @@ class VideoFrameViewer(QMainWindow):
               <li>Drag annotation boundaries to manually adjust onset/duration.</li>
               <li>Press <b>D</b> to delete the selected annotation.</li>
               <li>Right-click an annotation for <b>Edit label</b>, <b>auto_repair</b>,
-                  <b>auto_repair_eog</b>, <b>Revert auto_repair</b>, or <b>Delete annotation</b>.</li>
+                  <b>auto_repair_eog</b>, <b>auto_repair_ear</b>, <b>Revert auto_repair</b>, or <b>Delete annotation</b>.</li>
               <li>The <b>Unsaved changes</b> label means annotations changed in memory but are not saved yet.</li>
             </ul>
 
             <h3>Auto Repair</h3>
             <p>
               <b>auto_repair</b> uses <b>EEG-E8</b> with zero crossings.
-              <b>auto_repair_eog</b> uses <b>EOG-EEG-eog_vert_left</b> with the configured
-              threshold value and unit. Choose V, mV, µV, kµV, or nV beside the threshold field;
-              positive thresholds find peaks, and negative thresholds find EOG troughs.
+              <b>auto_repair_eog</b> uses <b>EOG-EEG-eog_vert_left</b>: finds the maximum
+              amplitude within the annotation window, then walks left and right to the first
+              local minimum in each direction, expanding beyond the annotation if needed.
+              <b>auto_repair_ear</b> uses <b>EAR-avg_ear</b>: finds the minimum amplitude
+              within the annotation window, then walks left and right to the first local
+              maximum in each direction, expanding beyond the annotation if needed.
             </p>
             <ul>
               <li><b>Space</b>: repair the currently selected annotation.</li>
               <li><b>R</b>: run auto_repair_eog on the currently selected annotation.</li>
+              <li><b>E</b>: run auto_repair_ear on the currently selected annotation.</li>
               <li><b>Right-click &gt; auto_repair</b>: repair the clicked annotation.</li>
               <li><b>Right-click &gt; auto_repair_eog</b>: repair the clicked annotation using EOG-EEG-eog_vert_left.</li>
-              <li><b>Bulk auto_repair</b>: repair all annotations in memory. This does <b>not</b> save automatically.</li>
+              <li><b>Right-click &gt; auto_repair_ear</b>: repair the clicked annotation using EAR-avg_ear.</li>
+              <li><b>Bulk auto_repair</b>: repair all annotations using the EOG peak-trough algorithm (same as R). This does <b>not</b> save automatically.</li>
               <li>Bulk auto_repair never merges annotations. Each annotation remains separate.</li>
               <li><b>Right-click &gt; Revert auto_repair</b>: restore that annotation's original onset/duration.</li>
               <li><b>Revert all auto_repair</b>: restore every auto-repaired annotation to its original bounds.</li>
@@ -1523,6 +1530,12 @@ class VideoFrameViewer(QMainWindow):
             self._handle_auto_repair_eog_shortcut
         )
 
+        auto_repair_ear_shortcut = QShortcut(QKeySequence(Qt.Key_E), self)
+        auto_repair_ear_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        auto_repair_ear_shortcut.activated.connect(
+            self._handle_auto_repair_ear_shortcut
+        )
+
         delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
         delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         delete_annotation_shortcut.activated.connect(self._handle_delete_annotation_shortcut)
@@ -1539,6 +1552,10 @@ class VideoFrameViewer(QMainWindow):
         stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         stop_shortcut.activated.connect(self._stop_all_play)
 
+        undo_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Z), self)
+        undo_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        undo_shortcut.activated.connect(self._handle_undo_shortcut)
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
@@ -1553,8 +1570,10 @@ class VideoFrameViewer(QMainWindow):
         self.save_annotations_shortcut = save_annotations_shortcut
         self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
         self.auto_repair_eog_shortcut = auto_repair_eog_shortcut
+        self.auto_repair_ear_shortcut = auto_repair_ear_shortcut
         self.delete_annotation_shortcut = delete_annotation_shortcut
         self.forward_play_shortcut = forward_play_shortcut
+        self.undo_shortcut = undo_shortcut
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -1587,9 +1606,17 @@ class VideoFrameViewer(QMainWindow):
         if self._shortcut_allowed():
             self.time_series_viewer.auto_repair_selected_annotation_eog()
 
+    def _handle_auto_repair_ear_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.auto_repair_selected_annotation_ear()
+
     def _handle_delete_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.delete_selected_annotation()
+
+    def _handle_undo_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.undo_last_annotation()
 
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()

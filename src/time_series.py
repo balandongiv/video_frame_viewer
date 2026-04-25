@@ -149,6 +149,7 @@ class TimeSeriesViewer(QWidget):
         self._last_annotation_description = ""
         self._annotation_filter_value = self.FILTER_ALL
         self._selected_annotation: Optional[Annotation] = None
+        self._last_create_undo: Optional[callable] = None
         self._auto_repair_original_bounds: dict[int, tuple[float, float]] = {}
         self._auto_repair_notes: dict[int, str] = {}
         self._ear_gain_enabled = False
@@ -327,7 +328,7 @@ class TimeSeriesViewer(QWidget):
         right_layout.addWidget(
             QLabel(
                 "Shortcuts: [ or B = back, ] or N = next (EAR min), "
-                "Space = auto_repair"
+                "Space = auto_repair, R = auto_repair_eog, E = auto_repair_ear"
             )
         )
         right_controls.setLayout(right_layout)
@@ -1383,6 +1384,9 @@ class TimeSeriesViewer(QWidget):
         auto_repair_eog_action = menu.addAction(
             f"auto_repair_eog ({EOG_REPAIR_CHANNEL})"
         )
+        auto_repair_ear_action = menu.addAction(
+            f"auto_repair_ear ({EAR_AVG_CHANNEL})"
+        )
         revert_auto_repair_action = menu.addAction("Revert auto_repair")
         revert_auto_repair_action.setEnabled(
             id(annotation_item.annotation) in self._auto_repair_original_bounds
@@ -1395,6 +1399,8 @@ class TimeSeriesViewer(QWidget):
             self._auto_repair_annotation(annotation_item)
         elif selected_action == auto_repair_eog_action:
             self._auto_repair_annotation_eog(annotation_item.annotation)
+        elif selected_action == auto_repair_ear_action:
+            self._auto_repair_annotation_ear(annotation_item.annotation)
         elif selected_action == revert_auto_repair_action:
             self._revert_auto_repair(annotation_item.annotation)
         elif selected_action == delete_action:
@@ -1533,16 +1539,71 @@ class TimeSeriesViewer(QWidget):
         self._auto_repair_annotation_eog(self._selected_annotation)
 
     def _auto_repair_annotation_eog(self, annotation: Annotation) -> None:
-        mode_label = (
-            "auto_repair_eog "
-            f"({self._repair_threshold:g} {self._repair_threshold_unit})"
-        )
         result = self._auto_repair_eog_bounds(annotation)
         if result is None:
             return
         self._apply_auto_repair_result(
-            annotation, result, channel_name=EOG_REPAIR_CHANNEL, mode_label=mode_label
+            annotation, result, channel_name=EOG_REPAIR_CHANNEL, mode_label="auto_repair_eog"
         )
+
+    def auto_repair_selected_annotation_ear(self) -> None:
+        """Repair the selected annotation using EAR-avg_ear minimum-to-peak walking."""
+
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation before using auto_repair_ear.")
+            return
+        self._auto_repair_annotation_ear(self._selected_annotation)
+
+    def _auto_repair_annotation_ear(self, annotation: Annotation) -> None:
+        result = self._auto_repair_ear_bounds(annotation)
+        if result is None:
+            return
+        self._apply_auto_repair_result(
+            annotation, result, channel_name=EAR_AVG_CHANNEL, mode_label="auto_repair_ear"
+        )
+
+    def _auto_repair_ear_bounds(
+        self, annotation: Annotation
+    ) -> Optional[tuple[float, float, float, bool]]:
+        if self.raw is None or self._times is None or self._times.size == 0:
+            self.status_label.setText("No time series loaded for auto_repair_ear.")
+            return None
+
+        ear_index = self._channel_index_by_name(EAR_AVG_CHANNEL)
+        if ear_index is None:
+            self.status_label.setText(
+                f"{EAR_AVG_CHANNEL} not available for auto_repair_ear."
+            )
+            return None
+
+        channel_data = self._repair_channel_data(ear_index)
+        channel_times = self.raw.times
+        if channel_data.size != channel_times.size:
+            self.status_label.setText("EAR sample/time mismatch; auto_repair_ear skipped.")
+            return None
+
+        data_end = float(self._times[-1])
+        start = max(0.0, annotation.onset)
+        end = min(annotation.onset + annotation.duration, data_end)
+        if end <= start:
+            self.status_label.setText("Annotation is empty; auto_repair_ear skipped.")
+            return None
+
+        repaired = self._repair_ear_bounds_from_trough_peak(
+            channel_times,
+            channel_data,
+            annotation_onset=start,
+            annotation_duration=end - start,
+        )
+        if repaired is None:
+            self.status_label.setText(
+                f"No finite minimum found in the annotation window for auto_repair_ear."
+            )
+            return None
+
+        repaired_start, repaired_end, event_time = repaired
+        duration = max(0.0, repaired_end - repaired_start)
+        return repaired_start, duration, event_time, False
 
     def _auto_repair_annotation_model(
         self,
@@ -1572,6 +1633,11 @@ class TimeSeriesViewer(QWidget):
         channel_name: str,
         mode_label: str,
     ) -> None:
+        pre_onset = annotation.onset
+        pre_duration = annotation.duration
+        self._last_create_undo = self._make_undo_annotation_repair(
+            annotation, pre_onset, pre_duration
+        )
         self._store_auto_repair_original_bounds(annotation)
         onset, duration, peak_time, used_split_boundary = result
         unchanged = math.isclose(annotation.onset, onset) and math.isclose(
@@ -1595,7 +1661,7 @@ class TimeSeriesViewer(QWidget):
             )
 
     def bulk_auto_repair_annotations(self) -> None:
-        """Repair every annotation in memory without saving the CSV."""
+        """Repair every annotation in memory using EOG peak-trough without saving the CSV."""
 
         if not self._annotations:
             self.status_label.setText("No annotations available for bulk auto_repair.")
@@ -1611,15 +1677,9 @@ class TimeSeriesViewer(QWidget):
         failed_count = 0
         unchanged_count = 0
         last_repaired: Optional[Annotation] = None
-        annotation_bounds = self._annotation_bounds_snapshot()
         try:
             for checked_count, annotation in enumerate(list(self._annotations), start=1):
-                result = self._auto_repair_bounds(
-                    annotation,
-                    annotation_bounds=annotation_bounds,
-                    channel_name=DEFAULT_PRIMARY_CHANNEL,
-                    threshold=0.0,
-                )
+                result = self._auto_repair_eog_bounds(annotation)
                 if result is None:
                     failed_count += 1
                 else:
@@ -1786,41 +1846,33 @@ class TimeSeriesViewer(QWidget):
             return None
 
         channel_times = self.raw.times
-        channel_data = self._convert_target_data_to_unit(
-            channel_data, self._repair_threshold_unit
-        )
         if channel_data.size != channel_times.size:
             self.status_label.setText(
                 "EOG sample/time mismatch; auto_repair_eog skipped."
             )
             return None
 
-        threshold = self._repair_threshold
         print(
             f"[EOG_REPAIR] annotation onset={annotation.onset:.6f} "
-            f"duration={annotation.duration:.6f} "
-            f"threshold={threshold:g} unit={self._repair_threshold_unit}"
+            f"duration={annotation.duration:.6f}"
         )
-        repaired = self._repair_eog_bounds_from_threshold_segment(
+        repaired = self._repair_eog_bounds_from_peak_trough(
             channel_times,
             channel_data,
             annotation_onset=start,
             annotation_duration=end - start,
-            threshold=threshold,
         )
         if repaired is None:
-            print("[EOG_REPAIR] repair failed: no threshold segment found")
+            print("[EOG_REPAIR] repair failed: no finite peak in annotation window")
             self.status_label.setText(
-                f"No local EOG threshold segment crosses {threshold:g} "
-                f"{self._repair_threshold_unit} around the selected annotation."
+                "No finite peak found in the annotation window for auto_repair_eog."
             )
             return None
 
         repaired_start, repaired_end, event_time = repaired
-        peak_inside = repaired_start <= event_time <= repaired_end
         print(
             f"[EOG_REPAIR] left={repaired_start:.4f} right={repaired_end:.4f} "
-            f"peak={event_time:.4f} peak_inside={peak_inside}"
+            f"peak={event_time:.4f}"
         )
         duration = max(0.0, repaired_end - repaired_start)
         return repaired_start, duration, event_time, False
@@ -1950,6 +2002,160 @@ class TimeSeriesViewer(QWidget):
         if scale == 0:
             return data
         return data / scale
+
+    @staticmethod
+    def _eog_find_left_trough_index(
+        data: np.ndarray, peak_idx: int, min_separation: int = 4
+    ) -> int:
+        """Walk left from peak_idx to find the first local minimum.
+
+        A turning point is only accepted once we are at least min_separation samples
+        from the peak, preventing noise wiggles 2–3 samples from the peak from being
+        mistaken for the blink boundary. If the signal never turns, returns 0.
+        """
+        i = peak_idx
+        while i > 0:
+            if data[i - 1] > data[i] and (peak_idx - i) >= min_separation:
+                return i
+            i -= 1
+        return 0
+
+    @staticmethod
+    def _eog_find_right_trough_index(
+        data: np.ndarray, peak_idx: int, min_separation: int = 4
+    ) -> int:
+        """Walk right from peak_idx to find the first local minimum.
+
+        A turning point is only accepted once we are at least min_separation samples
+        from the peak, preventing noise wiggles 2–3 samples from the peak from being
+        mistaken for the blink boundary. If the signal never turns, returns the last index.
+        """
+        i = peak_idx
+        n = len(data)
+        while i < n - 1:
+            if data[i + 1] > data[i] and (i - peak_idx) >= min_separation:
+                return i
+            i += 1
+        return n - 1
+
+    @staticmethod
+    def _ear_find_left_peak_index(
+        data: np.ndarray, min_idx: int, min_separation: int = 1
+    ) -> int:
+        """Walk left from min_idx to find the first local maximum.
+
+        A local maximum is where data[i-1] < data[i], meaning the signal rises
+        before index i and falls after (entering the valley). min_separation
+        prevents detecting a peak in the first sample adjacent to the minimum.
+        Returns 0 if no turning point is found.
+        """
+        i = min_idx
+        while i > 0:
+            if data[i - 1] < data[i] and (min_idx - i) >= min_separation:
+                return i
+            i -= 1
+        return 0
+
+    @staticmethod
+    def _ear_find_right_peak_index(
+        data: np.ndarray, min_idx: int, min_separation: int = 1
+    ) -> int:
+        """Walk right from min_idx to find the first local maximum.
+
+        A local maximum is where data[i+1] < data[i], meaning the signal rises
+        after the minimum and then starts falling. min_separation prevents
+        detecting a peak in the first sample adjacent to the minimum.
+        Returns the last index if no turning point is found.
+        """
+        i = min_idx
+        n = len(data)
+        while i < n - 1:
+            if data[i + 1] < data[i] and (i - min_idx) >= min_separation:
+                return i
+            i += 1
+        return n - 1
+
+    @staticmethod
+    def _repair_eog_bounds_from_peak_trough(
+        times: np.ndarray,
+        data: np.ndarray,
+        annotation_onset: float,
+        annotation_duration: float,
+    ) -> Optional[tuple[float, float, float]]:
+        """Find repaired bounds using peak-to-trough walking.
+
+        Finds the maximum amplitude within the annotation window, then walks left
+        and right through the full data to find the first local minimum in each
+        direction. If no turning point is found within the annotation, the search
+        naturally extends beyond the annotation boundaries.
+
+        Returns (left_time, right_time, peak_time) or None if no finite peak exists.
+        """
+        if times.size == 0 or data.size == 0 or times.size != data.size:
+            return None
+
+        annotation_end = annotation_onset + max(0.0, annotation_duration)
+        start_idx = int(np.searchsorted(times, annotation_onset, side="left"))
+        end_idx = int(np.searchsorted(times, annotation_end, side="right")) - 1
+        start_idx = max(0, start_idx)
+        end_idx = min(int(times.size) - 1, end_idx)
+        if end_idx < start_idx:
+            return None
+
+        window_data = data[start_idx : end_idx + 1]
+        finite_mask = np.isfinite(window_data)
+        if not np.any(finite_mask):
+            return None
+
+        peak_offset = int(np.argmax(np.where(finite_mask, window_data, -np.inf)))
+        peak_idx = start_idx + peak_offset
+        peak_time = float(times[peak_idx])
+
+        left_idx = TimeSeriesViewer._eog_find_left_trough_index(data, peak_idx)
+        right_idx = TimeSeriesViewer._eog_find_right_trough_index(data, peak_idx)
+
+        return float(times[left_idx]), float(times[right_idx]), peak_time
+
+    @staticmethod
+    def _repair_ear_bounds_from_trough_peak(
+        times: np.ndarray,
+        data: np.ndarray,
+        annotation_onset: float,
+        annotation_duration: float,
+    ) -> Optional[tuple[float, float, float]]:
+        """Find repaired bounds using trough-to-peak walking for EAR-avg_ear.
+
+        Finds the minimum amplitude within the annotation window, then walks left
+        and right through the full data to find the first local maximum in each
+        direction. If no turning point is found within the annotation, the search
+        naturally extends beyond the annotation boundaries.
+
+        Returns (left_time, right_time, min_time) or None if no finite minimum exists.
+        """
+        if times.size == 0 or data.size == 0 or times.size != data.size:
+            return None
+
+        annotation_end = annotation_onset + max(0.0, annotation_duration)
+        start_idx = int(np.searchsorted(times, annotation_onset, side="left"))
+        end_idx = int(np.searchsorted(times, annotation_end, side="right")) - 1
+        start_idx = max(0, start_idx)
+        end_idx = min(int(times.size) - 1, end_idx)
+        if end_idx < start_idx:
+            return None
+
+        window_data = data[start_idx : end_idx + 1]
+        finite_mask = np.isfinite(window_data)
+        if not np.any(finite_mask):
+            return None
+
+        min_offset = int(np.argmin(np.where(finite_mask, window_data, np.inf)))
+        min_idx = start_idx + min_offset
+        min_time = float(times[min_idx])
+
+        left_idx = TimeSeriesViewer._ear_find_left_peak_index(data, min_idx)
+        right_idx = TimeSeriesViewer._ear_find_right_peak_index(data, min_idx)
+
+        return float(times[left_idx]), float(times[right_idx]), min_time
 
     @staticmethod
     def _repair_eog_bounds_from_threshold_segment(
@@ -2558,10 +2764,14 @@ class TimeSeriesViewer(QWidget):
             self._annotations.append(annotation)
             self._render_annotation(annotation)
             self.status_label.setText("Annotation added.")
+            self._last_create_undo = self._make_undo_new_annotation(annotation)
             return annotation
 
         merged_annotation = overlaps[0]
-        for annotation in overlaps[1:]:
+        original_onset = merged_annotation.onset
+        original_duration = merged_annotation.duration
+        absorbed = list(overlaps[1:])
+        for annotation in absorbed:
             self._remove_annotation_from_model(annotation)
             self._remove_annotation_regions(annotation)
 
@@ -2573,7 +2783,61 @@ class TimeSeriesViewer(QWidget):
             merged_annotation.duration,
         )
         self.status_label.setText("Annotation merged with existing label.")
+        self._last_create_undo = self._make_undo_merge_annotation(
+            merged_annotation, original_onset, original_duration, absorbed
+        )
         return merged_annotation
+
+    def _make_undo_new_annotation(self, annotation: Annotation):
+        def undo():
+            self._remove_annotation_from_model(annotation)
+            self._remove_annotation_regions(annotation)
+            if self._selected_annotation is annotation:
+                self._selected_annotation = None
+            self._set_annotations_dirty(True)
+            self._update_annotation_filter_options()
+            self.status_label.setText("Undo: annotation removed.")
+        return undo
+
+    def _make_undo_annotation_repair(
+        self, annotation: Annotation, onset: float, duration: float
+    ):
+        def undo():
+            annotation.onset = onset
+            annotation.duration = duration
+            self._sync_annotation_regions(annotation, onset, duration)
+            self._auto_repair_original_bounds.pop(id(annotation), None)
+            self._auto_repair_notes.pop(id(annotation), None)
+            self._set_selected_annotation(annotation, announce=False)
+            self._set_annotations_dirty(True)
+            self.status_label.setText("Undo: annotation repair reverted.")
+        return undo
+
+    def _make_undo_merge_annotation(
+        self,
+        merged: Annotation,
+        original_onset: float,
+        original_duration: float,
+        absorbed: List[Annotation],
+    ):
+        def undo():
+            merged.onset = original_onset
+            merged.duration = original_duration
+            self._sync_annotation_regions(merged, original_onset, original_duration)
+            for annotation in absorbed:
+                self._annotations.append(annotation)
+                self._render_annotation(annotation)
+            self._set_annotations_dirty(True)
+            self._update_annotation_filter_options()
+            self.status_label.setText("Undo: merge reversed.")
+        return undo
+
+    def undo_last_annotation(self) -> None:
+        if self._last_create_undo is None:
+            self.status_label.setText("Nothing to undo.")
+            return
+        self._last_create_undo()
+        self._last_create_undo = None
 
     def _start_annotation_drag(self, pos) -> None:
         time_value = self._time_at_position(pos)

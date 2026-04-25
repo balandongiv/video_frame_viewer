@@ -353,6 +353,73 @@ class AutoRepairAnnotationTests(unittest.TestCase):
 
         np.testing.assert_array_equal(repaired_data, np.array([1.0, 2.0, 3.0]))
 
+    def test_eog_peak_trough_matches_user_example(self) -> None:
+        # Peak=10 at index 5; left trough=-1 at index 1 (4 samples left, accepted).
+        # Right trough=4 at index 8 is only 3 samples away so it is skipped;
+        # the walk continues to the data edge at index 9.
+        times = np.arange(10, dtype=float)
+        data = np.array([0.0, -1.0, 0.0, 2.0, 3.0, 10.0, 9.0, 5.0, 4.0, 9.0])
+
+        repaired = TimeSeriesViewer._repair_eog_bounds_from_peak_trough(
+            times, data, annotation_onset=0.0, annotation_duration=10.0
+        )
+
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        left_time, right_time, peak_time = repaired
+        self.assertAlmostEqual(peak_time, 5.0)
+        self.assertAlmostEqual(left_time, 1.0)
+        self.assertAlmostEqual(right_time, 9.0)
+
+    def test_eog_find_left_trough_finds_local_minimum(self) -> None:
+        # Trough at index 1 is exactly 4 samples from peak at index 5 — accepted.
+        data = np.array([0.0, -1.0, 0.0, 2.0, 3.0, 10.0, 9.0, 5.0, 4.0, 9.0])
+        self.assertEqual(TimeSeriesViewer._eog_find_left_trough_index(data, 5), 1)
+
+    def test_eog_find_right_trough_finds_local_minimum(self) -> None:
+        # Trough at index 8 is exactly 4 samples from peak at index 4 — accepted.
+        data = np.array([0.0, 1.0, 2.0, 3.0, 10.0, 8.0, 6.0, 4.0, 2.0, 3.0])
+        self.assertEqual(TimeSeriesViewer._eog_find_right_trough_index(data, 4), 8)
+
+    def test_eog_trough_skips_turning_point_closer_than_min_separation(self) -> None:
+        # Right trough at index 8 is 3 samples from peak at index 5 — too close,
+        # so the walk continues to the data edge at index 9.
+        data = np.array([0.0, -1.0, 0.0, 2.0, 3.0, 10.0, 9.0, 5.0, 4.0, 9.0])
+        self.assertEqual(TimeSeriesViewer._eog_find_right_trough_index(data, 5), 9)
+
+    def test_eog_find_left_trough_returns_zero_when_no_turn(self) -> None:
+        # Monotonically increasing going leftward: no local minimum before the peak.
+        data = np.array([1.0, 2.0, 3.0, 4.0, 10.0])
+        self.assertEqual(TimeSeriesViewer._eog_find_left_trough_index(data, 4), 0)
+
+    def test_eog_find_right_trough_returns_last_when_no_turn(self) -> None:
+        data = np.array([10.0, 9.0, 8.0, 7.0, 6.0])
+        self.assertEqual(TimeSeriesViewer._eog_find_right_trough_index(data, 0), 4)
+
+    def test_eog_peak_trough_extends_beyond_annotation_for_left_boundary(self) -> None:
+        # Annotation covers only the peak and the rising right side;
+        # the left trough must be found outside the annotation window.
+        times = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        data = np.array([-1.0, 0.0, 10.0, 8.0, 5.0, 3.0])
+        # Annotation window starts at t=2 (peak), so left trough at index 0 is outside
+        repaired = TimeSeriesViewer._repair_eog_bounds_from_peak_trough(
+            times, data, annotation_onset=2.0, annotation_duration=4.0
+        )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        left_time, right_time, peak_time = repaired
+        self.assertAlmostEqual(peak_time, 2.0)
+        self.assertAlmostEqual(left_time, 0.0)
+        self.assertAlmostEqual(right_time, 5.0)
+
+    def test_eog_peak_trough_returns_none_when_annotation_outside_data(self) -> None:
+        times = np.arange(10, dtype=float)
+        data = np.ones(10)
+        result = TimeSeriesViewer._repair_eog_bounds_from_peak_trough(
+            times, data, annotation_onset=20.0, annotation_duration=5.0
+        )
+        self.assertIsNone(result)
+
     def test_plot_channel_indices_only_include_required_channels(self) -> None:
         class FakeRaw:
             ch_names = [
@@ -403,6 +470,67 @@ class AutoRepairAnnotationTests(unittest.TestCase):
         data = np.array([-1.0, -0.5, -1.0])
 
         self.assertIsNone(TimeSeriesViewer._repair_bounds_from_samples(times, data))
+
+    # --- EAR repair tests ---
+
+    def test_ear_find_left_peak_example_from_spec(self) -> None:
+        # Signal from spec: 290, 390, 300, 250, 100, 150, 200, 500, 400
+        # min at index 4; left peak at index 1 (value 390) because data[0]=290 < data[1]=390
+        data = np.array([290.0, 390.0, 300.0, 250.0, 100.0, 150.0, 200.0, 500.0, 400.0])
+        self.assertEqual(TimeSeriesViewer._ear_find_left_peak_index(data, 4), 1)
+
+    def test_ear_find_right_peak_example_from_spec(self) -> None:
+        # Signal from spec: 290, 390, 300, 250, 100, 150, 200, 500, 400
+        # min at index 4; right peak at index 7 (value 500) because data[8]=400 < data[7]=500
+        data = np.array([290.0, 390.0, 300.0, 250.0, 100.0, 150.0, 200.0, 500.0, 400.0])
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 4), 7)
+
+    def test_ear_find_left_peak_returns_zero_when_no_turn(self) -> None:
+        # Monotonically decreasing going leftward: no local maximum before the minimum.
+        data = np.array([5.0, 4.0, 3.0, 2.0, 1.0])
+        self.assertEqual(TimeSeriesViewer._ear_find_left_peak_index(data, 4), 0)
+
+    def test_ear_find_right_peak_returns_last_when_no_turn(self) -> None:
+        # Monotonically increasing going rightward: no local maximum after the minimum.
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        self.assertEqual(TimeSeriesViewer._ear_find_right_peak_index(data, 0), 4)
+
+    def test_repair_ear_bounds_from_trough_peak_spec_example(self) -> None:
+        # Full spec example: annotation covers entire signal.
+        # min=100 at index 4; left=390 at index 1; right=500 at index 7
+        times = np.arange(9, dtype=float)
+        data = np.array([290.0, 390.0, 300.0, 250.0, 100.0, 150.0, 200.0, 500.0, 400.0])
+        repaired = TimeSeriesViewer._repair_ear_bounds_from_trough_peak(
+            times, data, annotation_onset=0.0, annotation_duration=9.0
+        )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        left_time, right_time, min_time = repaired
+        self.assertAlmostEqual(min_time, 4.0)
+        self.assertAlmostEqual(left_time, 1.0)
+        self.assertAlmostEqual(right_time, 7.0)
+
+    def test_repair_ear_bounds_extends_beyond_annotation(self) -> None:
+        # Annotation covers only the valley; peaks are outside the annotation window.
+        times = np.arange(7, dtype=float)
+        data = np.array([500.0, 300.0, 100.0, 50.0, 100.0, 300.0, 500.0])
+        repaired = TimeSeriesViewer._repair_ear_bounds_from_trough_peak(
+            times, data, annotation_onset=2.0, annotation_duration=2.0
+        )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        left_time, right_time, min_time = repaired
+        self.assertAlmostEqual(min_time, 3.0)
+        self.assertAlmostEqual(left_time, 0.0)
+        self.assertAlmostEqual(right_time, 6.0)
+
+    def test_repair_ear_bounds_returns_none_when_annotation_outside_data(self) -> None:
+        times = np.arange(5, dtype=float)
+        data = np.ones(5)
+        result = TimeSeriesViewer._repair_ear_bounds_from_trough_peak(
+            times, data, annotation_onset=20.0, annotation_duration=5.0
+        )
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
