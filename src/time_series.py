@@ -1597,6 +1597,24 @@ class TimeSeriesViewer(QWidget):
             return
         self._auto_repair_annotation_ear(self._selected_annotation)
 
+    def auto_repair_selected_annotation_ear_with_peak(self, nth_peak: int) -> None:
+        """Repair the selected annotation using EAR-avg_ear with a specific nth_peak."""
+
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation before using auto_repair_ear.")
+            return
+        result = self._auto_repair_ear_bounds(self._selected_annotation, nth_peak=nth_peak)
+        if result is None:
+            return
+        self._apply_auto_repair_result(
+            self._selected_annotation, result, channel_name=EAR_AVG_CHANNEL, mode_label="auto_repair_ear"
+        )
+
+    def auto_repair_selected_annotation_eog_with_peak(self, nth_peak: int) -> None:
+        """Repair the selected annotation using EOG (nth_peak reserved for future use)."""
+
+        self.auto_repair_selected_annotation_eog()
+
     def _auto_repair_annotation_ear(self, annotation: Annotation) -> None:
         result = self._auto_repair_ear_bounds(annotation)
         if result is None:
@@ -1606,7 +1624,7 @@ class TimeSeriesViewer(QWidget):
         )
 
     def _auto_repair_ear_bounds(
-        self, annotation: Annotation
+        self, annotation: Annotation, nth_peak: Optional[int] = None
     ) -> Optional[tuple[float, float, float, bool]]:
         if self.raw is None or self._times is None or self._times.size == 0:
             self.status_label.setText("No time series loaded for auto_repair_ear.")
@@ -1637,7 +1655,7 @@ class TimeSeriesViewer(QWidget):
             channel_data,
             annotation_onset=start,
             annotation_duration=end - start,
-            nth_peak=self._ear_repair_nth_peak,
+            nth_peak=nth_peak if nth_peak is not None else self._ear_repair_nth_peak,
         )
         if repaired is None:
             self.status_label.setText(

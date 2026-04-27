@@ -144,6 +144,9 @@ class VideoFrameViewer(QMainWindow):
         self._forward_play_timer = QTimer(self)
         self._forward_play_timer.timeout.connect(self._forward_play_tick)
 
+        self._e_key_held: bool = False
+        self._e_digit_consumed: bool = False
+
         self._setup_ui()
         self._setup_shortcuts()
         self.frame_scroll.viewport().installEventFilter(self)
@@ -1534,12 +1537,6 @@ class VideoFrameViewer(QMainWindow):
             self._handle_auto_repair_eog_shortcut
         )
 
-        auto_repair_ear_shortcut = QShortcut(QKeySequence(Qt.Key_E), self)
-        auto_repair_ear_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        auto_repair_ear_shortcut.activated.connect(
-            self._handle_auto_repair_ear_shortcut
-        )
-
         delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
         delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         delete_annotation_shortcut.activated.connect(self._handle_delete_annotation_shortcut)
@@ -1588,7 +1585,6 @@ class VideoFrameViewer(QMainWindow):
         self.save_annotations_shortcut = save_annotations_shortcut
         self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
         self.auto_repair_eog_shortcut = auto_repair_eog_shortcut
-        self.auto_repair_ear_shortcut = auto_repair_ear_shortcut
         self.delete_annotation_shortcut = delete_annotation_shortcut
         self.forward_play_shortcut = forward_play_shortcut
         self.undo_shortcut = undo_shortcut
@@ -1627,10 +1623,6 @@ class VideoFrameViewer(QMainWindow):
         if self._shortcut_allowed():
             self.time_series_viewer.auto_repair_selected_annotation_eog()
 
-    def _handle_auto_repair_ear_shortcut(self) -> None:
-        if self._shortcut_allowed():
-            self.time_series_viewer.auto_repair_selected_annotation_ear()
-
     def _handle_nudge_left_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.nudge_selected_annotation_left()
@@ -1654,6 +1646,35 @@ class VideoFrameViewer(QMainWindow):
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()
         return not isinstance(focus_widget, (QLineEdit, QSpinBox, QTextBrowser, QTextEdit))
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_E and not event.isAutoRepeat():
+            self._e_key_held = True
+            self._e_digit_consumed = False
+            event.accept()
+            return
+        if self._e_key_held and not event.isAutoRepeat():
+            digit = {
+                Qt.Key_1: 1, Qt.Key_2: 2, Qt.Key_3: 3,
+                Qt.Key_4: 4, Qt.Key_5: 5, Qt.Key_6: 6,
+                Qt.Key_7: 7, Qt.Key_8: 8, Qt.Key_9: 9,
+            }.get(event.key())
+            if digit is not None and self._shortcut_allowed():
+                self._e_digit_consumed = True
+                self.time_series_viewer.auto_repair_selected_annotation_ear_with_peak(digit)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key_E and not event.isAutoRepeat():
+            if not self._e_digit_consumed and self._shortcut_allowed():
+                self.time_series_viewer.auto_repair_selected_annotation_ear()
+            self._e_key_held = False
+            self._e_digit_consumed = False
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def _toggle_annotation_play(self, checked: bool) -> None:
         if checked:
