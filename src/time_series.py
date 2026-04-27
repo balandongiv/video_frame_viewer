@@ -17,6 +17,7 @@ import numpy as np
 import pyqtgraph as pg
 from mne.io.constants import FIFF
 from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -348,7 +349,8 @@ class TimeSeriesViewer(QWidget):
         right_layout.addWidget(
             QLabel(
                 "Shortcuts: [ or B = back, ] or N = next (EAR min), "
-                "Space = auto_repair, R = auto_repair_eog, E = auto_repair_ear"
+                "Space = auto_repair, R = auto_repair_eog, E = auto_repair_ear, "
+                "Shift+←/→ = nudge annotation, Ctrl+C = create from EAR"
             )
         )
         right_controls.setLayout(right_layout)
@@ -1239,6 +1241,13 @@ class TimeSeriesViewer(QWidget):
             anchor_time = self._time_at_position(event.pos(), self._widget_for_viewport(obj))
             self._adjust_zoom(multiplier, anchor_time=anchor_time)
             return True
+        if obj in self._plot_viewports() and event.type() == QEvent.MouseButtonPress:
+            if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.ControlModifier):
+                widget = self._widget_for_viewport(obj)
+                t = self._time_at_position(event.pos(), widget)
+                if t is not None and self._times is not None and self._times.size > 0:
+                    self._move_cursor_to(t)
+
         if obj is self.plot_widget.viewport():
             if event.type() == QEvent.MouseButtonPress:
                 if event.button() == Qt.RightButton:
@@ -1260,6 +1269,16 @@ class TimeSeriesViewer(QWidget):
                     return True
 
         return super().eventFilter(obj, event)
+
+    def _move_cursor_to(self, time: float) -> None:
+        """Update the cursor line position without re-centering the view."""
+        if self._times is None or self._times.size == 0:
+            return
+        clamped = max(0.0, min(time, float(self._times[-1])))
+        self._last_cursor_time = clamped
+        for cursor_line in self._lane_cursor_lines.values():
+            cursor_line.setPos(clamped)
+            cursor_line.show()
 
     def _plot_viewports(self) -> set[object]:
         return {widget.viewport() for widget in self._lane_widgets}
@@ -3401,6 +3420,100 @@ class TimeSeriesViewer(QWidget):
         self._set_annotations_dirty(True)
         self.status_label.setText(
             f"Nudged annotation '{annotation.description}' to {annotation.onset:.2f}s."
+        )
+
+    def nudge_selected_annotation_left(self) -> None:
+        """Move the selected annotation left by one nudge step (Shift+Left)."""
+        self._nudge_selected_annotation(-1)
+
+    def nudge_selected_annotation_right(self) -> None:
+        """Move the selected annotation right by one nudge step (Shift+Right)."""
+        self._nudge_selected_annotation(1)
+
+    def _mouse_time_in_plot(self) -> Optional[float]:
+        """Return the time under the mouse cursor if it is over any lane widget, else None."""
+        global_pos = QCursor.pos()
+        for widget in self._lane_widgets:
+            local_pos = widget.mapFromGlobal(global_pos)
+            rect = widget.rect()
+            if rect.contains(local_pos):
+                t = self._time_at_position(local_pos, widget)
+                if t is not None and self._times is not None and self._times.size > 0:
+                    data_end = float(self._times[-1])
+                    if 0.0 <= t <= data_end:
+                        return t
+        return None
+
+    def create_annotation_from_ear(self) -> None:
+        """Create a new annotation by finding the EAR trough near the cursor or mouse.
+
+        The search window is one view-span wide, centered on:
+          1. The mouse position, if the pointer is currently over a plot lane.
+          2. The red cursor line otherwise.
+
+        Finds the minimum EAR-avg_ear amplitude in that window, walks left and
+        right to the Nth local peak (ear_repair_nth_peak setting), prompts for
+        a label, and creates the annotation.
+        """
+        if self.raw is None or self._times is None or self._times.size == 0:
+            self.status_label.setText("No time series loaded.")
+            return
+
+        ear_index = self._channel_index_by_name(EAR_AVG_CHANNEL)
+        if ear_index is None:
+            self.status_label.setText(f"{EAR_AVG_CHANNEL} not available for annotation creation.")
+            return
+
+        channel_data = self._repair_channel_data(ear_index)
+        channel_times = self.raw.times
+        if channel_data.size != channel_times.size:
+            self.status_label.setText("EAR sample/time mismatch; annotation creation skipped.")
+            return
+
+        center_time = self._mouse_time_in_plot()
+        if center_time is None:
+            center_time = self._last_cursor_time
+
+        half_span = self.view_span_seconds / 2.0
+        data_end = float(self._times[-1])
+        search_start = max(0.0, center_time - half_span)
+        search_end = min(data_end, center_time + half_span)
+        if search_end <= search_start:
+            self.status_label.setText("View window too small; move cursor and try again.")
+            return
+
+        repaired = self._repair_ear_bounds_from_trough_peak(
+            channel_times,
+            channel_data,
+            annotation_onset=search_start,
+            annotation_duration=search_end - search_start,
+            nth_peak=self._ear_repair_nth_peak,
+        )
+        if repaired is None:
+            self.status_label.setText(
+                "No finite EAR minimum found near the cursor for annotation creation."
+            )
+            return
+
+        onset, end_time, min_time = repaired
+        duration = max(MIN_ANNOTATION_DURATION, end_time - onset)
+        if onset + duration > data_end:
+            onset = max(0.0, data_end - duration)
+
+        description = self._prompt_for_description()
+        if not description:
+            return
+
+        annotation = Annotation(onset=onset, duration=duration, description=description)
+        self._annotations.append(annotation)
+        self._render_annotation(annotation)
+        self._last_create_undo = self._make_undo_new_annotation(annotation)
+        self._set_selected_annotation(annotation, announce=False)
+        self._set_annotations_dirty(True)
+        self._update_annotation_filter_options()
+        self.status_label.setText(
+            f"Created annotation '{description}' at {onset:.3f}s–{onset + duration:.3f}s "
+            f"around EAR trough at {min_time:.3f}s."
         )
 
     def _nudge_all_annotations(self, direction: int) -> None:

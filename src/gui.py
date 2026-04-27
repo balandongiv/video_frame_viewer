@@ -492,6 +492,9 @@ class VideoFrameViewer(QMainWindow):
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
               <tr><td>R</td><td>Auto-repair EOG for the selected annotation.</td></tr>
               <tr><td>E</td><td>Auto-repair EAR for the selected annotation (EAR-avg_ear: finds minimum, walks to local peaks).</td></tr>
+              <tr><td>Shift + Left</td><td>Nudge the selected annotation left by the configured nudge step.</td></tr>
+              <tr><td>Shift + Right</td><td>Nudge the selected annotation right by the configured nudge step.</td></tr>
+              <tr><td>Ctrl + C</td><td>Auto-create annotation from EAR-avg_ear: finds the lowest EAR amplitude in the current view, walks to local peaks left and right, then prompts for a label.</td></tr>
               <tr><td>D</td><td>Delete the selected annotation.</td></tr>
               <tr><td>Ctrl + Z</td><td>Undo the last annotation creation (or merge).</td></tr>
               <tr><td colspan="2"><i>File</i></td></tr>
@@ -522,6 +525,7 @@ class VideoFrameViewer(QMainWindow):
               <li><b>Space</b>: repair the currently selected annotation.</li>
               <li><b>R</b>: run auto_repair_eog on the currently selected annotation.</li>
               <li><b>E</b>: run auto_repair_ear on the currently selected annotation.</li>
+              <li><b>Ctrl + C</b>: auto-create a new annotation from the EAR trough in the current view window (no annotation needs to be selected).</li>
               <li><b>Right-click &gt; auto_repair</b>: repair the clicked annotation.</li>
               <li><b>Right-click &gt; auto_repair_eog</b>: repair the clicked annotation using EOG-EEG-eog_vert_left.</li>
               <li><b>Right-click &gt; auto_repair_ear</b>: repair the clicked annotation using EAR-avg_ear.</li>
@@ -1556,6 +1560,20 @@ class VideoFrameViewer(QMainWindow):
         undo_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         undo_shortcut.activated.connect(self._handle_undo_shortcut)
 
+        nudge_left_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_Left), self)
+        nudge_left_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        nudge_left_shortcut.activated.connect(self._handle_nudge_left_shortcut)
+
+        nudge_right_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_Right), self)
+        nudge_right_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        nudge_right_shortcut.activated.connect(self._handle_nudge_right_shortcut)
+
+        create_ear_annotation_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_C), self)
+        create_ear_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        create_ear_annotation_shortcut.activated.connect(
+            self._handle_create_ear_annotation_shortcut
+        )
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
@@ -1574,6 +1592,9 @@ class VideoFrameViewer(QMainWindow):
         self.delete_annotation_shortcut = delete_annotation_shortcut
         self.forward_play_shortcut = forward_play_shortcut
         self.undo_shortcut = undo_shortcut
+        self.nudge_left_shortcut = nudge_left_shortcut
+        self.nudge_right_shortcut = nudge_right_shortcut
+        self.create_ear_annotation_shortcut = create_ear_annotation_shortcut
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -1609,6 +1630,18 @@ class VideoFrameViewer(QMainWindow):
     def _handle_auto_repair_ear_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.auto_repair_selected_annotation_ear()
+
+    def _handle_nudge_left_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.nudge_selected_annotation_left()
+
+    def _handle_nudge_right_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.nudge_selected_annotation_right()
+
+    def _handle_create_ear_annotation_shortcut(self) -> None:
+        if self._shortcut_allowed():
+            self.time_series_viewer.create_annotation_from_ear()
 
     def _handle_delete_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
