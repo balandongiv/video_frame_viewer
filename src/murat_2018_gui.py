@@ -233,7 +233,7 @@ class Murat2018Viewer(QMainWindow):
         self.step_seconds_input = QDoubleSpinBox()
         self.step_seconds_input.setRange(0.01, 3600.0)
         self.step_seconds_input.setDecimals(3)
-        self.step_seconds_input.setSingleStep(0.5)
+        self.step_seconds_input.setSingleStep(0.01)
         self.step_seconds_input.setValue(self.DEFAULT_STEP_SECONDS)
 
         self.left_button = QPushButton("Left")
@@ -267,9 +267,9 @@ class Murat2018Viewer(QMainWindow):
         self.play_button.setCheckable(True)
         self.play_button.clicked.connect(self._toggle_annotation_play)
         self.play_speed_spinbox = QDoubleSpinBox()
-        self.play_speed_spinbox.setRange(0.5, 30.0)
+        self.play_speed_spinbox.setRange(0, 30.0)
         self.play_speed_spinbox.setValue(2.0)
-        self.play_speed_spinbox.setSingleStep(0.5)
+        self.play_speed_spinbox.setSingleStep(0.1)
         self.play_speed_spinbox.setSuffix(" s")
         self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
         play_layout.addWidget(self.play_button)
@@ -282,8 +282,8 @@ class Murat2018Viewer(QMainWindow):
         self.forward_play_button.setCheckable(True)
         self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
         self.forward_play_speed_spinbox = QDoubleSpinBox()
-        self.forward_play_speed_spinbox.setRange(0.1, 30.0)
-        self.forward_play_speed_spinbox.setValue(0.5)
+        self.forward_play_speed_spinbox.setRange(0.016, 30.0)
+        self.forward_play_speed_spinbox.setValue(0.1)
         self.forward_play_speed_spinbox.setSingleStep(0.1)
         self.forward_play_speed_spinbox.setSuffix(" s")
         self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F to toggle)")
@@ -845,7 +845,7 @@ class Murat2018Viewer(QMainWindow):
             self._stop_forward_play()
 
     def _start_forward_play(self) -> None:
-        interval_ms = int(self.forward_play_speed_spinbox.value() * 1000)
+        interval_ms = max(16, int(self.forward_play_speed_spinbox.value() * 1000))
         self._forward_play_timer.start(interval_ms)
         self.forward_play_button.setChecked(True)
         self.forward_play_button.setText("Stop Forward")
@@ -858,7 +858,7 @@ class Murat2018Viewer(QMainWindow):
         self._set_status("Auto-forward stopped.")
 
     def _forward_play_tick(self) -> None:
-        interval_ms = int(self.forward_play_speed_spinbox.value() * 1000)
+        interval_ms = max(16, int(self.forward_play_speed_spinbox.value() * 1000))
         if self._forward_play_timer.interval() != interval_ms:
             self._forward_play_timer.setInterval(interval_ms)
         current_time = self.time_series_viewer.current_cursor_time()
