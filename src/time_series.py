@@ -1611,9 +1611,17 @@ class TimeSeriesViewer(QWidget):
         )
 
     def auto_repair_selected_annotation_eog_with_peak(self, nth_peak: int) -> None:
-        """Repair the selected annotation using EOG (nth_peak reserved for future use)."""
+        """Repair the selected annotation using EOG with a specific nth_trough."""
 
-        self.auto_repair_selected_annotation_eog()
+        if self._selected_annotation is None:
+            self.status_label.setText("Select an annotation before using auto_repair_eog.")
+            return
+        result = self._auto_repair_eog_bounds(self._selected_annotation, nth_trough=nth_peak)
+        if result is None:
+            return
+        self._apply_auto_repair_result(
+            self._selected_annotation, result, channel_name=EOG_REPAIR_CHANNEL, mode_label="auto_repair_eog"
+        )
 
     def _auto_repair_annotation_ear(self, annotation: Annotation) -> None:
         result = self._auto_repair_ear_bounds(annotation)
@@ -1887,7 +1895,7 @@ class TimeSeriesViewer(QWidget):
         return f"{annotation.description}\n{note}"
 
     def _auto_repair_eog_bounds(
-        self, annotation: Annotation
+        self, annotation: Annotation, nth_trough: Optional[int] = None
     ) -> Optional[tuple[float, float, float, bool]]:
         if self.raw is None or self._times is None or self._times.size == 0:
             self.status_label.setText("No time series loaded for auto_repair_eog.")
@@ -1923,6 +1931,7 @@ class TimeSeriesViewer(QWidget):
             channel_data,
             annotation_onset=start,
             annotation_duration=end - start,
+            nth_trough=nth_trough if nth_trough is not None else 1,
         )
         if repaired is None:
             print("[EOG_REPAIR] repair failed: no finite peak in annotation window")
@@ -2067,36 +2076,42 @@ class TimeSeriesViewer(QWidget):
 
     @staticmethod
     def _eog_find_left_trough_index(
-        data: np.ndarray, peak_idx: int, min_separation: int = 4
+        data: np.ndarray, peak_idx: int, nth_trough: int = 1, min_separation: int = 4
     ) -> int:
-        """Walk left from peak_idx to find the first local minimum.
+        """Walk left from peak_idx and return the index of the Nth local minimum.
 
         A turning point is only accepted once we are at least min_separation samples
         from the peak, preventing noise wiggles 2–3 samples from the peak from being
-        mistaken for the blink boundary. If the signal never turns, returns 0.
+        mistaken for the blink boundary. Returns 0 if fewer than nth_trough troughs found.
         """
+        count = 0
         i = peak_idx
         while i > 0:
             if data[i - 1] > data[i] and (peak_idx - i) >= min_separation:
-                return i
+                count += 1
+                if count >= nth_trough:
+                    return i
             i -= 1
         return 0
 
     @staticmethod
     def _eog_find_right_trough_index(
-        data: np.ndarray, peak_idx: int, min_separation: int = 4
+        data: np.ndarray, peak_idx: int, nth_trough: int = 1, min_separation: int = 4
     ) -> int:
-        """Walk right from peak_idx to find the first local minimum.
+        """Walk right from peak_idx and return the index of the Nth local minimum.
 
         A turning point is only accepted once we are at least min_separation samples
         from the peak, preventing noise wiggles 2–3 samples from the peak from being
-        mistaken for the blink boundary. If the signal never turns, returns the last index.
+        mistaken for the blink boundary. Returns the last index if fewer than nth_trough troughs found.
         """
+        count = 0
         i = peak_idx
         n = len(data)
         while i < n - 1:
             if data[i + 1] > data[i] and (i - peak_idx) >= min_separation:
-                return i
+                count += 1
+                if count >= nth_trough:
+                    return i
             i += 1
         return n - 1
 
@@ -2149,6 +2164,7 @@ class TimeSeriesViewer(QWidget):
         data: np.ndarray,
         annotation_onset: float,
         annotation_duration: float,
+        nth_trough: int = 1,
     ) -> Optional[tuple[float, float, float]]:
         """Find repaired bounds using peak-to-trough walking.
 
@@ -2179,8 +2195,8 @@ class TimeSeriesViewer(QWidget):
         peak_idx = start_idx + peak_offset
         peak_time = float(times[peak_idx])
 
-        left_idx = TimeSeriesViewer._eog_find_left_trough_index(data, peak_idx)
-        right_idx = TimeSeriesViewer._eog_find_right_trough_index(data, peak_idx)
+        left_idx = TimeSeriesViewer._eog_find_left_trough_index(data, peak_idx, nth_trough)
+        right_idx = TimeSeriesViewer._eog_find_right_trough_index(data, peak_idx, nth_trough)
 
         return float(times[left_idx]), float(times[right_idx]), peak_time
 

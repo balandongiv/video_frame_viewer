@@ -146,6 +146,8 @@ class VideoFrameViewer(QMainWindow):
 
         self._e_key_held: bool = False
         self._e_digit_consumed: bool = False
+        self._r_key_held: bool = False
+        self._r_digit_consumed: bool = False
 
         self._setup_ui()
         self._setup_shortcuts()
@@ -493,8 +495,10 @@ class VideoFrameViewer(QMainWindow):
               <tr><td>ESC</td><td>Stop all active playback (annotation play and forward play).</td></tr>
               <tr><td colspan="2"><i>Annotation Editing</i></td></tr>
               <tr><td>Space</td><td>Auto-repair the selected annotation.</td></tr>
-              <tr><td>R</td><td>Auto-repair EOG for the selected annotation.</td></tr>
+              <tr><td>R</td><td>Auto-repair EOG for the selected annotation (walks to the 1st local minimum on each side of the peak).</td></tr>
+              <tr><td>R + 1–9</td><td>Auto-repair EOG with the Nth local minimum as the boundary (e.g. R+2 walks to the 2nd local minimum).</td></tr>
               <tr><td>E</td><td>Auto-repair EAR for the selected annotation (EAR-avg_ear: finds minimum, walks to local peaks).</td></tr>
+              <tr><td>E + 1–9</td><td>Auto-repair EAR with a specific nth_peak (e.g. E+2 walks to the 2nd local peak). Overrides the nth peak spinbox.</td></tr>
               <tr><td>Shift + Left</td><td>Nudge the selected annotation left by the configured nudge step.</td></tr>
               <tr><td>Shift + Right</td><td>Nudge the selected annotation right by the configured nudge step.</td></tr>
               <tr><td>Ctrl + C</td><td>Auto-create annotation from EAR-avg_ear: finds the lowest EAR amplitude in the current view, walks to local peaks left and right, then prompts for a label.</td></tr>
@@ -526,8 +530,10 @@ class VideoFrameViewer(QMainWindow):
             </p>
             <ul>
               <li><b>Space</b>: repair the currently selected annotation.</li>
-              <li><b>R</b>: run auto_repair_eog on the currently selected annotation.</li>
-              <li><b>E</b>: run auto_repair_ear on the currently selected annotation.</li>
+              <li><b>R</b>: run auto_repair_eog on the currently selected annotation (walks to the 1st local minimum on each side of the EOG peak).</li>
+              <li><b>R + digit (1–9)</b>: run auto_repair_eog walking to the Nth local minimum on each side of the EOG peak (hold R and press a digit simultaneously).</li>
+              <li><b>E</b>: run auto_repair_ear on the currently selected annotation (uses the nth peak spinbox value).</li>
+              <li><b>E + digit (1–9)</b>: run auto_repair_ear with that digit as nth_peak, overriding the spinbox (hold E and press a digit simultaneously).</li>
               <li><b>Ctrl + C</b>: auto-create a new annotation from the EAR trough in the current view window (no annotation needs to be selected).</li>
               <li><b>Right-click &gt; auto_repair</b>: repair the clicked annotation.</li>
               <li><b>Right-click &gt; auto_repair_eog</b>: repair the clicked annotation using EOG-EEG-eog_vert_left.</li>
@@ -1531,11 +1537,6 @@ class VideoFrameViewer(QMainWindow):
             self._handle_auto_repair_annotation_shortcut
         )
 
-        auto_repair_eog_shortcut = QShortcut(QKeySequence(Qt.Key_R), self)
-        auto_repair_eog_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        auto_repair_eog_shortcut.activated.connect(
-            self._handle_auto_repair_eog_shortcut
-        )
 
         delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
         delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -1584,7 +1585,6 @@ class VideoFrameViewer(QMainWindow):
         self.previous_annotation_letter = previous_annotation_letter
         self.save_annotations_shortcut = save_annotations_shortcut
         self.auto_repair_annotation_shortcut = auto_repair_annotation_shortcut
-        self.auto_repair_eog_shortcut = auto_repair_eog_shortcut
         self.delete_annotation_shortcut = delete_annotation_shortcut
         self.forward_play_shortcut = forward_play_shortcut
         self.undo_shortcut = undo_shortcut
@@ -1619,10 +1619,6 @@ class VideoFrameViewer(QMainWindow):
         if self._shortcut_allowed():
             self.time_series_viewer.auto_repair_selected_annotation()
 
-    def _handle_auto_repair_eog_shortcut(self) -> None:
-        if self._shortcut_allowed():
-            self.time_series_viewer.auto_repair_selected_annotation_eog()
-
     def _handle_nudge_left_shortcut(self) -> None:
         if self._shortcut_allowed():
             self.time_series_viewer.nudge_selected_annotation_left()
@@ -1653,17 +1649,29 @@ class VideoFrameViewer(QMainWindow):
             self._e_digit_consumed = False
             event.accept()
             return
-        if self._e_key_held and not event.isAutoRepeat():
-            digit = {
-                Qt.Key_1: 1, Qt.Key_2: 2, Qt.Key_3: 3,
-                Qt.Key_4: 4, Qt.Key_5: 5, Qt.Key_6: 6,
-                Qt.Key_7: 7, Qt.Key_8: 8, Qt.Key_9: 9,
-            }.get(event.key())
-            if digit is not None and self._shortcut_allowed():
-                self._e_digit_consumed = True
-                self.time_series_viewer.auto_repair_selected_annotation_ear_with_peak(digit)
-                event.accept()
-                return
+        if event.key() == Qt.Key_R and not event.isAutoRepeat():
+            self._r_key_held = True
+            self._r_digit_consumed = False
+            event.accept()
+            return
+        _DIGIT_MAP = {
+            Qt.Key_1: 1, Qt.Key_2: 2, Qt.Key_3: 3,
+            Qt.Key_4: 4, Qt.Key_5: 5, Qt.Key_6: 6,
+            Qt.Key_7: 7, Qt.Key_8: 8, Qt.Key_9: 9,
+        }
+        if not event.isAutoRepeat() and self._shortcut_allowed():
+            digit = _DIGIT_MAP.get(event.key())
+            if digit is not None:
+                if self._e_key_held:
+                    self._e_digit_consumed = True
+                    self.time_series_viewer.auto_repair_selected_annotation_ear_with_peak(digit)
+                    event.accept()
+                    return
+                if self._r_key_held:
+                    self._r_digit_consumed = True
+                    self.time_series_viewer.auto_repair_selected_annotation_eog_with_peak(digit)
+                    event.accept()
+                    return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:
@@ -1672,6 +1680,13 @@ class VideoFrameViewer(QMainWindow):
                 self.time_series_viewer.auto_repair_selected_annotation_ear()
             self._e_key_held = False
             self._e_digit_consumed = False
+            event.accept()
+            return
+        if event.key() == Qt.Key_R and not event.isAutoRepeat():
+            if not self._r_digit_consumed and self._shortcut_allowed():
+                self.time_series_viewer.auto_repair_selected_annotation_eog()
+            self._r_key_held = False
+            self._r_digit_consumed = False
             event.accept()
             return
         super().keyReleaseEvent(event)
