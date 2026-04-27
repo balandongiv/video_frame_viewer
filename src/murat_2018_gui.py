@@ -233,8 +233,23 @@ class Murat2018Viewer(QMainWindow):
         self.step_seconds_input = QDoubleSpinBox()
         self.step_seconds_input.setRange(0.01, 3600.0)
         self.step_seconds_input.setDecimals(3)
-        self.step_seconds_input.setSingleStep(0.01)
+        self.step_seconds_input.setSingleStep(0.5)
         self.step_seconds_input.setValue(self.DEFAULT_STEP_SECONDS)
+
+        self.step_dec_button = QPushButton("-")
+        self.step_dec_button.setFixedWidth(28)
+        self.step_dec_button.setToolTip("Decrease step size")
+        self.step_dec_button.clicked.connect(self._decrease_step)
+        self.step_inc_button = QPushButton("+")
+        self.step_inc_button.setFixedWidth(28)
+        self.step_inc_button.setToolTip("Increase step size")
+        self.step_inc_button.clicked.connect(self._increase_step)
+
+        step_layout = QHBoxLayout()
+        step_layout.setContentsMargins(0, 0, 0, 0)
+        step_layout.addWidget(self.step_dec_button)
+        step_layout.addWidget(self.step_seconds_input)
+        step_layout.addWidget(self.step_inc_button)
 
         self.left_button = QPushButton("Left")
         self.right_button = QPushButton("Right")
@@ -250,17 +265,23 @@ class Murat2018Viewer(QMainWindow):
 
         self.current_time_label = QLabel("Current time: -")
 
+        self.window_dropdown = QComboBox()
+        self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s"])
+        self.window_dropdown.currentIndexChanged.connect(self._on_window_changed)
+
         layout.addWidget(QLabel("Time (s):"), 0, 0)
         layout.addWidget(self.time_input, 0, 1)
         layout.addWidget(self.time_search_button, 0, 2)
         layout.addWidget(QLabel("Step (s):"), 1, 0)
-        layout.addWidget(self.step_seconds_input, 1, 1, 1, 2)
-        layout.addWidget(self.left_button, 2, 0)
-        layout.addWidget(self.right_button, 2, 1)
-        layout.addWidget(self.save_annotations_button, 2, 2)
-        layout.addWidget(QLabel("Status:"), 3, 0)
-        layout.addWidget(self.status_dropdown, 3, 1, 1, 2)
-        layout.addWidget(self.current_time_label, 4, 0, 1, 3)
+        layout.addLayout(step_layout, 1, 1, 1, 2)
+        layout.addWidget(QLabel("Window:"), 2, 0)
+        layout.addWidget(self.window_dropdown, 2, 1, 1, 2)
+        layout.addWidget(self.left_button, 3, 0)
+        layout.addWidget(self.right_button, 3, 1)
+        layout.addWidget(self.save_annotations_button, 3, 2)
+        layout.addWidget(QLabel("Status:"), 4, 0)
+        layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
+        layout.addWidget(self.current_time_label, 5, 0, 1, 3)
 
         play_layout = QHBoxLayout()
         self.play_button = QPushButton("Play Annotations")
@@ -275,7 +296,7 @@ class Murat2018Viewer(QMainWindow):
         play_layout.addWidget(self.play_button)
         play_layout.addWidget(QLabel("Speed:"))
         play_layout.addWidget(self.play_speed_spinbox)
-        layout.addLayout(play_layout, 5, 0, 1, 3)
+        layout.addLayout(play_layout, 6, 0, 1, 3)
 
         forward_play_layout = QHBoxLayout()
         self.forward_play_button = QPushButton("Forward Play")
@@ -290,7 +311,7 @@ class Murat2018Viewer(QMainWindow):
         forward_play_layout.addWidget(self.forward_play_button)
         forward_play_layout.addWidget(QLabel("Speed:"))
         forward_play_layout.addWidget(self.forward_play_speed_spinbox)
-        layout.addLayout(forward_play_layout, 6, 0, 1, 3)
+        layout.addLayout(forward_play_layout, 7, 0, 1, 3)
 
         return control_group
 
@@ -606,6 +627,9 @@ class Murat2018Viewer(QMainWindow):
             self.time_input,
             self.time_search_button,
             self.step_seconds_input,
+            self.step_dec_button,
+            self.step_inc_button,
+            self.window_dropdown,
             self.left_button,
             self.right_button,
             self.save_annotations_button,
@@ -752,6 +776,26 @@ class Murat2018Viewer(QMainWindow):
         except Exception as exc:
             self._set_status(f"Failed to load session state: {exc}")
             self._refresh_remark_history([])
+
+    def _increase_step(self) -> None:
+        self.step_seconds_input.setValue(
+            self.step_seconds_input.value() + self.step_seconds_input.singleStep()
+        )
+
+    def _decrease_step(self) -> None:
+        self.step_seconds_input.setValue(
+            max(self.step_seconds_input.minimum(),
+                self.step_seconds_input.value() - self.step_seconds_input.singleStep())
+        )
+
+    def _on_window_changed(self, index: int) -> None:
+        spans = [5.0, 10.0, 15.0, 30.0]
+        span = spans[index]
+        viewer = self.time_series_viewer
+        viewer.view_span_seconds = span
+        viewer.default_view_span_seconds = span
+        viewer.zoom_label.setText(viewer._zoom_label_text())
+        viewer._ensure_view_range(viewer._last_cursor_time)
 
     def _on_status_changed(self, text: str) -> None:
         self.status_value = text
