@@ -76,6 +76,9 @@ ANNOTATION_PALETTE = [
 ]
 MIN_ANNOTATION_DURATION = 0.1
 ANNOTATION_NUDGE_FPS = 30.0
+DOWNSAMPLE_LOWPASS_HZ = 20.0
+DOWNSAMPLE_SFREQ = 40.0
+DOWNSAMPLE_CACHE_SUFFIX = "_ds20hz.fif"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -128,6 +131,7 @@ class TimeSeriesViewer(QWidget):
         )
         if configured_repair_channel:
             self._primary_channel = configured_repair_channel
+        self._using_downsampled: bool = False
         self._last_cursor_time: float = 0.0
         self.default_view_span_seconds: float = 5.0
         self.view_span_seconds: float = self.default_view_span_seconds
@@ -509,6 +513,7 @@ class TimeSeriesViewer(QWidget):
         self._selected_annotation = None
         self._auto_repair_original_bounds.clear()
         self._auto_repair_notes.clear()
+        self._using_downsampled = False
 
     def _load_time_series_paths(
         self,
@@ -527,7 +532,9 @@ class TimeSeriesViewer(QWidget):
             self.cursor_line.hide()
             return
 
-        self.status_label.setText(f"Loading time series from {ts_path}...")
+        name = ts_path.name
+        self.status_label.setText(f"[1/4] Reading {name}…")
+        QApplication.processEvents()
         self._last_ts_path = ts_path
         self._last_video_path = source_video
         self._last_annotation_path = csv_path
@@ -540,8 +547,18 @@ class TimeSeriesViewer(QWidget):
             self.cursor_line.hide()
             return
         self._times = self.raw.times
+        n_ch = len(self.raw.ch_names)
+        duration_s = self.raw.times[-1] if self.raw.times.size else 0
+        self.status_label.setText(
+            f"[2/4] Populating {n_ch} channel(s) ({duration_s:.0f} s)…"
+        )
+        QApplication.processEvents()
         self._populate_channel_list()
+        self.status_label.setText(f"[3/4] Rendering plot…")
+        QApplication.processEvents()
         self._plot_data()
+        self.status_label.setText(f"[4/4] Loading annotations…")
+        QApplication.processEvents()
         self._add_annotations_for_path(csv_path)
         self._ensure_view_range(0.0)
         self._update_annotation_count_label()
@@ -549,10 +566,66 @@ class TimeSeriesViewer(QWidget):
     def _read_raw_time_series(self, ts_path: Path) -> mne.io.BaseRaw:
         suffix = ts_path.suffix.lower()
         if suffix == ".fif":
+            self.status_label.setText(f"[1/4] Reading FIF into memory: {ts_path.name}…")
+            QApplication.processEvents()
             return mne.io.read_raw_fif(str(ts_path), preload=True, verbose="ERROR")
         if suffix == ".edf":
-            return mne.io.read_raw_edf(str(ts_path), preload=True, verbose="ERROR")
+            return self._load_edf_downsampled(ts_path)
         raise ValueError(f"Unsupported time series format: {ts_path.suffix}")
+
+    def _load_edf_downsampled(self, edf_path: Path) -> mne.io.BaseRaw:
+        """Load an EDF via its downsampled cache, creating the cache if needed.
+
+        The cache is checked *before* the original EDF is opened, so repeated
+        loads are fast and only ever read the small FIF file.
+        """
+        cache_path = edf_path.with_name(edf_path.stem + DOWNSAMPLE_CACHE_SUFFIX)
+        name = edf_path.name
+
+        # Fast path: cache already exists — never touch the original EDF.
+        if cache_path.exists():
+            try:
+                self.status_label.setText(
+                    f"Loading downsampled cache ({DOWNSAMPLE_SFREQ:.0f} Hz) for {name}…"
+                )
+                QApplication.processEvents()
+                raw = mne.io.read_raw_fif(str(cache_path), preload=True, verbose="ERROR")
+                self._using_downsampled = True
+                return raw
+            except Exception:
+                cache_path.unlink(missing_ok=True)
+
+        # Slow path: cache missing — read EDF, downsample, save, return cache.
+        self.status_label.setText(f"[1/4] Reading EDF: {name}…")
+        QApplication.processEvents()
+        raw = mne.io.read_raw_edf(str(edf_path), preload=True, verbose="ERROR")
+
+        self.status_label.setText(
+            f"[2/4] Applying {DOWNSAMPLE_LOWPASS_HZ:.0f} Hz lowpass filter: {name}…"
+        )
+        QApplication.processEvents()
+        ds_raw = raw.copy()
+        ds_raw.filter(None, DOWNSAMPLE_LOWPASS_HZ, fir_design="firwin", verbose="ERROR")
+
+        self.status_label.setText(f"[3/4] Resampling to {DOWNSAMPLE_SFREQ:.0f} Hz: {name}…")
+        QApplication.processEvents()
+        ds_raw.resample(DOWNSAMPLE_SFREQ, verbose="ERROR")
+
+        self.status_label.setText(f"[4/4] Saving downsampled cache: {cache_path.name}…")
+        QApplication.processEvents()
+        ds_raw.save(str(cache_path), overwrite=True, verbose="ERROR")
+
+        self.status_label.setText(
+            f"Loading downsampled cache ({DOWNSAMPLE_SFREQ:.0f} Hz) for {name}…"
+        )
+        QApplication.processEvents()
+        self._using_downsampled = True
+        return mne.io.read_raw_fif(str(cache_path), preload=True, verbose="ERROR")
+
+    @property
+    def using_downsampled(self) -> bool:
+        """True when the displayed data comes from a downsampled cache file."""
+        return self._using_downsampled
 
     def update_cursor_time(self, seconds: float) -> None:
         """Keep the current time centered under a fixed cursor."""

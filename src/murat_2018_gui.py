@@ -59,7 +59,16 @@ class MuratRecording:
 
     subject_id: str
     folder: Path
-    edf_path: Path
+    ts_path: Path  # .fif (downsampled) or .edf (original)
+
+    @property
+    def edf_path(self) -> Path:
+        """Always points to the original .edf, used for CSV path derivation."""
+        if self.ts_path.suffix == ".edf":
+            return self.ts_path
+        # ts_path is a .fif — the matching .edf shares the subject folder name
+        edf_candidates = sorted(self.folder.glob("*.edf"))
+        return edf_candidates[0] if edf_candidates else self.ts_path.with_suffix(".edf")
 
     @property
     def csv_path(self) -> Path:
@@ -307,7 +316,7 @@ class Murat2018Viewer(QMainWindow):
         self.forward_play_speed_spinbox.setValue(0.1)
         self.forward_play_speed_spinbox.setSingleStep(0.1)
         self.forward_play_speed_spinbox.setSuffix(" s")
-        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F to toggle)")
+        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F or Q to toggle)")
         forward_play_layout.addWidget(self.forward_play_button)
         forward_play_layout.addWidget(QLabel("Speed:"))
         forward_play_layout.addWidget(self.forward_play_speed_spinbox)
@@ -403,7 +412,7 @@ class Murat2018Viewer(QMainWindow):
             csv_state = "CSV" if recording.csv_path.exists() else "No CSV"
             blinker_state = "Blinker" if recording.blinker_path.exists() else "No Blinker"
             item = QListWidgetItem(
-                f"{recording.subject_id} | {recording.edf_path.name} | {csv_state} | {blinker_state}"
+                f"{recording.subject_id} | {recording.ts_path.name} | {csv_state} | {blinker_state}"
             )
             item.setData(Qt.UserRole, recording)
             self.recording_list.addItem(item)
@@ -420,13 +429,15 @@ class Murat2018Viewer(QMainWindow):
             (path for path in dataset_root.iterdir() if path.is_dir()),
             key=lambda path: self._subject_sort_key(path.name),
         ):
+            fif_files = sorted(folder.glob("*_ds20hz.fif"), key=lambda path: path.name.lower())
             edf_files = sorted(folder.glob("*.edf"), key=lambda path: path.name.lower())
-            if not edf_files:
+            ts_file = fif_files[0] if fif_files else (edf_files[0] if edf_files else None)
+            if ts_file is None:
                 continue
             recording = MuratRecording(
                 subject_id=folder.name,
                 folder=folder,
-                edf_path=edf_files[0],
+                ts_path=ts_file,
             )
             try:
                 ensure_murat_session_file(recording.folder)
@@ -453,11 +464,14 @@ class Murat2018Viewer(QMainWindow):
 
         self.current_recording = recording
         created, message = self._ensure_blinker_annotation_csv(recording)
-        self.time_series_viewer.load_time_series_file(recording.edf_path, recording.csv_path)
+        self._set_status(f"Loading {recording.subject_id} — {recording.ts_path.name}…")
+        QApplication.processEvents()
+        self.time_series_viewer.load_time_series_file(recording.ts_path, recording.csv_path)
         loaded_ts, loaded_csv = self.time_series_viewer.last_loaded_paths()
         loaded = loaded_ts is not None
         self._update_review_controls(loaded)
         self._update_selected_summary(recording, loaded_ts, loaded_csv)
+        self._refresh_current_list_item()
         self._load_session_state()
         self._refresh_dataset_summary()
 
@@ -659,8 +673,14 @@ class Murat2018Viewer(QMainWindow):
             self.summary_blinker_label.setText("Blinker: (not loaded)")
             return
 
+        ds_tag = (
+            f"downsampled 0–{int(self.time_series_viewer.raw.info['sfreq'])} Hz display"
+            if self.time_series_viewer.using_downsampled and self.time_series_viewer.raw is not None
+            else "full-resolution"
+        )
+        ts_label = "FIF" if recording.ts_path.suffix == ".fif" else "EDF"
         self.summary_edf_label.setText(
-            self._format_path_line("EDF", recording.edf_path, loaded_ts is not None)
+            self._format_path_line(ts_label, recording.ts_path, loaded_ts is not None, extra=ds_tag)
         )
         self.summary_csv_label.setText(
             self._format_path_line("CSV", recording.csv_path, loaded_csv is not None)
@@ -669,17 +689,31 @@ class Murat2018Viewer(QMainWindow):
             self._format_path_line("Blinker", recording.blinker_path, recording.blinker_path.exists())
         )
 
-    def _format_path_line(self, label: str, path: Path, loaded: bool) -> str:
+    def _format_path_line(self, label: str, path: Path, loaded: bool, extra: str = "") -> str:
         exists = "found" if path.exists() else "missing"
         state = "loaded" if loaded else "expected"
-        return f"{label}: {path} [{state}, {exists}]"
+        base = f"{label}: {path} [{state}, {exists}]"
+        return f"{base} [{extra}]" if extra else base
+
+    def _refresh_current_list_item(self) -> None:
+        selected_items = self.recording_list.selectedItems()
+        if not selected_items:
+            return
+        recording = selected_items[0].data(Qt.UserRole)
+        if not isinstance(recording, MuratRecording):
+            return
+        csv_state = "CSV" if recording.csv_path.exists() else "No CSV"
+        blinker_state = "Blinker" if recording.blinker_path.exists() else "No Blinker"
+        selected_items[0].setText(
+            f"{recording.subject_id} | {recording.ts_path.name} | {csv_state} | {blinker_state}"
+        )
 
     def _refresh_dataset_summary(self) -> None:
         totals = {
             "recordings": len(self.recordings),
             "csv": sum(1 for item in self.recordings if item.csv_path.exists()),
             "blinker": sum(1 for item in self.recordings if item.blinker_path.exists()),
-            "edf": sum(1 for item in self.recordings if item.edf_path.exists()),
+            "edf": sum(1 for item in self.recordings if item.ts_path.exists()),
         }
         self.summary_overall_label.setText(
             "Dataset summary: "
@@ -695,7 +729,7 @@ class Murat2018Viewer(QMainWindow):
                 self._status_for_recording(recording),
                 "yes" if recording.csv_path.exists() else "missing",
                 "yes" if recording.blinker_path.exists() else "missing",
-                "yes" if recording.edf_path.exists() else "missing",
+                "yes" if recording.ts_path.exists() else "missing",
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -963,6 +997,10 @@ class Murat2018Viewer(QMainWindow):
         self.forward_play_shortcut = QShortcut(QKeySequence(Qt.Key_F), self)
         self.forward_play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.forward_play_shortcut.activated.connect(self._toggle_forward_play)
+
+        self.forward_play_shortcut_q = QShortcut(QKeySequence(Qt.Key_Q), self)
+        self.forward_play_shortcut_q.setContext(Qt.WidgetWithChildrenShortcut)
+        self.forward_play_shortcut_q.activated.connect(self._toggle_forward_play)
 
         self.stop_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
         self.stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
