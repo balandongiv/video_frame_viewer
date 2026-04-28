@@ -149,6 +149,7 @@ class TimeSeriesViewer(QWidget):
         self._annotations: List[Annotation] = []
         self._annotations_dirty = False
         self._annotation_dragging = False
+        self._annotation_drag_right = False
         self._annotation_drag_start: Optional[float] = None
         self._annotation_drag_preview: Optional[pg.LinearRegionItem] = None
         self._last_annotation_description = ""
@@ -1324,7 +1325,8 @@ class TimeSeriesViewer(QWidget):
         if obj is self.plot_widget.viewport():
             if event.type() == QEvent.MouseButtonPress:
                 if event.button() == Qt.RightButton:
-                    self._handle_annotation_context_menu(event.pos())
+                    self._start_annotation_drag(event.pos())
+                    self._annotation_drag_right = True
                     return True
                 if event.button() == Qt.LeftButton:
                     if event.modifiers() & Qt.ControlModifier:
@@ -1339,6 +1341,9 @@ class TimeSeriesViewer(QWidget):
             if event.type() == QEvent.MouseButtonRelease and self._annotation_dragging:
                 if event.button() == Qt.LeftButton:
                     self._finalize_annotation_drag(event.pos())
+                    return True
+                if event.button() == Qt.RightButton and self._annotation_drag_right:
+                    self._finalize_annotation_drag_blink(event.pos())
                     return True
 
         return super().eventFilter(obj, event)
@@ -3064,6 +3069,34 @@ class TimeSeriesViewer(QWidget):
 
         self._reset_annotation_drag()
 
+    def _finalize_annotation_drag_blink(self, pos) -> None:
+        """Finalize a right-button drag as a 'blink' annotation without a dialog."""
+        if self._annotation_drag_start is None or self._times is None:
+            self._reset_annotation_drag()
+            return
+
+        time_value = self._time_at_position(pos)
+        if time_value is None:
+            time_value = self._annotation_drag_start
+
+        data_end = float(self._times[-1])
+        start = max(0.0, min(self._annotation_drag_start, data_end))
+        end = max(0.0, min(time_value, data_end))
+        onset = min(start, end)
+        duration = abs(end - start)
+
+        if duration < MIN_ANNOTATION_DURATION:
+            # Negligible drag — treat as a plain right-click and show context menu.
+            self._reset_annotation_drag()
+            self._handle_annotation_context_menu(pos)
+            return
+
+        annotation = self._merge_annotation(onset, duration, "blink")
+        self._set_selected_annotation(annotation, announce=False)
+        self._set_annotations_dirty(True)
+        self._update_annotation_filter_options()
+        self._reset_annotation_drag()
+
     def _prompt_for_description(
         self, title: str = "Add annotation", current_value: str = ""
     ) -> str:
@@ -3118,6 +3151,7 @@ class TimeSeriesViewer(QWidget):
 
     def _reset_annotation_drag(self) -> None:
         self._annotation_dragging = False
+        self._annotation_drag_right = False
         self._annotation_drag_start = None
         if self._annotation_drag_preview is not None:
             self.plot_widget.removeItem(self._annotation_drag_preview)
