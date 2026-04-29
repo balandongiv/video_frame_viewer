@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import pickle
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,7 +74,7 @@ class CaoTimeSeriesViewer(TimeSeriesViewer):
 
 
 SESSION_FILENAME = "Cao2018Viewer.yaml"
-BLINKER_PICKLE = "pyblinker_results.pkl"
+BLINKER_PICKLE = "blinker_results.pkl"
 DEFAULT_SESSION_STATE = {
     "stop_position": 0.0,
     "status": "Pending",
@@ -545,50 +546,187 @@ class Cao2018Viewer(QMainWindow):
         with pickle_path.open("rb") as handle:
             payload = pickle.load(handle)
 
-        df = self._extract_events_df(payload)
-        if df is None:
+        return self._annotations_from_blinker_payload(payload)
+
+    def _annotations_from_blinker_payload(self, payload) -> list[dict[str, str]]:
+        rows = self._annotations_from_frame_payload(payload)
+        if rows:
+            return rows
+
+        if not isinstance(payload, dict):
+            return []
+
+        rows = self._annotations_from_frame_payload(payload.get("frames"))
+        if rows:
+            return rows
+
+        channels = payload.get("channels")
+        if not isinstance(channels, dict) or not channels:
+            return []
+
+        preferred_names = ["FP1", "FP2"]
+        ordered_names = preferred_names + [
+            name for name in channels.keys() if name not in preferred_names
+        ]
+        for name in ordered_names:
+            channel_payload = channels.get(name)
+            rows = self._annotations_from_channel_payload(channel_payload)
+            if rows:
+                return rows
+        return []
+
+    def _annotations_from_channel_payload(self, channel_payload) -> list[dict[str, str]]:
+        rows = self._annotations_from_frame_payload(channel_payload)
+        if rows:
+            return rows
+        if not isinstance(channel_payload, dict):
+            return []
+        return self._annotations_from_frame_payload(channel_payload.get("frames"))
+
+    def _annotations_from_frame_payload(self, payload) -> list[dict[str, str]]:
+        if payload is None:
+            return []
+
+        direct_rows = self._rows_from_onset_duration_table(payload)
+        if direct_rows:
+            return direct_rows
+
+        if not isinstance(payload, dict):
+            return []
+
+        events = payload.get("events")
+        event_rows = self._rows_from_pyblinker_events(events, payload)
+        if event_rows:
+            return event_rows
+
+        blink_fits = payload.get("blinkFits")
+        return self._rows_from_blink_fits(blink_fits, payload)
+
+    def _rows_from_onset_duration_table(self, table) -> list[dict[str, str]]:
+        if not hasattr(table, "iterrows") or not hasattr(table, "columns"):
+            return []
+        if "onset" not in table.columns or "duration" not in table.columns:
             return []
 
         rows: list[dict[str, str]] = []
-        for _, row in df.iterrows():
-            try:
-                onset = float(row["onset"])
-                duration = float(row["duration"])
-            except (KeyError, TypeError, ValueError):
+        for _, row in table.iterrows():
+            onset = self._numeric_value(row.get("onset"))
+            duration = self._numeric_value(row.get("duration"))
+            if onset is None or duration is None or duration <= 0:
                 continue
-            rows.append(
-                {
-                    "onset": f"{onset:.6f}",
-                    "duration": f"{duration:.6f}",
-                    "description": "eye_blink",
-                }
-            )
-        rows.sort(key=lambda r: float(r["onset"]))
+            rows.append(self._annotation_row(onset, duration))
+        rows.sort(key=lambda item: float(item["onset"]))
         return rows
 
-    @staticmethod
-    def _extract_events_df(payload):
-        """Return a DataFrame of blink events from either pickle format."""
-        # Format 1: payload is directly a DataFrame
-        if hasattr(payload, "iterrows"):
-            return payload
+    def _rows_from_pyblinker_events(self, events, frames: dict) -> list[dict[str, str]]:
+        if events is None or not hasattr(events, "itertuples"):
+            return []
 
-        # Format 2: {'channels': {'FP1': {'events': df, ...}, 'FP2': {...}}}
-        if not isinstance(payload, dict):
+        srate = self._pyblinker_sample_rate(frames)
+        rows: list[dict[str, str]] = []
+        for event in events.itertuples(index=False):
+            event_data = event._asdict()
+            bounds = self._pyblinker_bounds(event_data, srate)
+            if bounds is None:
+                continue
+            left_frame, right_frame = bounds
+            onset = max(0.0, left_frame / srate)
+            duration = max(0.1, (right_frame - left_frame) / srate)
+            rows.append(self._annotation_row(onset, duration))
+        rows.sort(key=lambda item: float(item["onset"]))
+        return rows
+
+    def _rows_from_blink_fits(self, blink_fits, frames: dict) -> list[dict[str, str]]:
+        if blink_fits is None or not hasattr(blink_fits, "iterrows"):
+            return []
+
+        srate = self._blinker_sample_rate(frames)
+        rows: list[dict[str, str]] = []
+        for _, row in blink_fits.iterrows():
+            bounds = self._blinker_bounds(row, srate)
+            if bounds is None:
+                continue
+            left_frame, right_frame = bounds
+            onset = max(0.0, left_frame / srate)
+            duration = max(0.1, (right_frame - left_frame) / srate)
+            rows.append(self._annotation_row(onset, duration))
+        rows.sort(key=lambda item: float(item["onset"]))
+        return rows
+
+    def _annotation_row(self, onset: float, duration: float) -> dict[str, str]:
+        return {
+            "onset": f"{onset:.6f}",
+            "duration": f"{duration:.6f}",
+            "description": "eye_blink",
+        }
+
+    def _pyblinker_sample_rate(self, frames: dict) -> float:
+        metrics = frames.get("metrics")
+        if isinstance(metrics, dict):
+            value = self._numeric_value(metrics.get("sampling_rate_hz"))
+            if value is not None and value > 0:
+                return value
+        return self._blinker_sample_rate(frames)
+
+    def _pyblinker_bounds(
+        self, event: dict[str, object], srate: float
+    ) -> Optional[tuple[float, float]]:
+        for left_name, right_name in (
+            ("start_blink", "end_blink"),
+            ("left_base", "right_base"),
+            ("left_zero", "right_zero"),
+            ("outer_start", "outer_end"),
+        ):
+            left = self._numeric_value(event.get(left_name))
+            right = self._numeric_value(event.get(right_name))
+            if left is not None and right is not None and right > left:
+                return left, right
+
+        peak = self._numeric_value(event.get("max_blink"))
+        if peak is None:
+            peak = self._numeric_value(event.get("peak_time_blink"))
+        if peak is None:
             return None
-        channels = payload.get("channels")
-        if not isinstance(channels, dict) or not channels:
+        half_width = 0.15 * srate
+        return max(0.0, peak - half_width), peak + half_width
+
+    def _blinker_sample_rate(self, frames: dict) -> float:
+        for key in ("blinkStats", "params"):
+            table = frames.get(key)
+            if table is None or not hasattr(table, "columns") or "srate" not in table.columns:
+                continue
+            if len(table.index) == 0:
+                continue
+            value = self._numeric_value(table.iloc[0].get("srate"))
+            if value is not None and value > 0:
+                return value
+        return 200.0
+
+    def _blinker_bounds(self, row, srate: float) -> Optional[tuple[float, float]]:
+        for left_name, right_name in (
+            ("leftBase", "rightBase"),
+            ("leftZero", "rightZero"),
+            ("leftOuter", "rightOuter"),
+        ):
+            left = self._numeric_value(row.get(left_name))
+            right = self._numeric_value(row.get(right_name))
+            if left is not None and right is not None and right > left:
+                return left, right
+
+        peak = self._numeric_value(row.get("maxFrame"))
+        if peak is None:
             return None
-        # Prefer FP1, else first available channel
-        preferred = ["FP1", "FP2"]
-        for name in preferred:
-            ch = channels.get(name)
-            if isinstance(ch, dict) and hasattr(ch.get("events"), "iterrows"):
-                return ch["events"]
-        first = next(iter(channels.values()))
-        if isinstance(first, dict) and hasattr(first.get("events"), "iterrows"):
-            return first["events"]
-        return None
+        half_width = 0.15 * srate
+        return max(0.0, peak - half_width), peak + half_width
+
+    def _numeric_value(self, value) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
 
     def _search_time(self) -> None:
         text = self.time_input.text().strip()
