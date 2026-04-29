@@ -45,6 +45,11 @@ from time_series import TimeSeriesViewer
 DEFAULT_MURAT_ROOT = Path(r"D:\dataset\murat_2018")
 SESSION_FILENAME = "Murat2018Viewer.yaml"
 BLINKER_PICKLE = "blinker_results.pkl"
+BLINKER_PICKLE_CANDIDATES = (
+    "exp08_pyblinker_results.pkl",
+    "exp07_pyblinker_results.pkl",
+    BLINKER_PICKLE,
+)
 DEFAULT_SESSION_STATE = {
     "stop_position": 0.0,
     "status": "Pending",
@@ -76,6 +81,10 @@ class MuratRecording:
 
     @property
     def blinker_path(self) -> Path:
+        for filename in BLINKER_PICKLE_CANDIDATES:
+            candidate = self.folder / filename
+            if candidate.exists():
+                return candidate
         return self.folder / BLINKER_PICKLE
 
     @property
@@ -507,6 +516,10 @@ class Murat2018Viewer(QMainWindow):
         if not isinstance(frames, dict):
             return []
 
+        pyblinker_rows = self._annotations_from_pyblinker_events(frames)
+        if pyblinker_rows:
+            return pyblinker_rows
+
         blink_fits = frames.get("blinkFits")
         if blink_fits is None or not hasattr(blink_fits, "iterrows"):
             return []
@@ -529,6 +542,61 @@ class Murat2018Viewer(QMainWindow):
             )
         rows.sort(key=lambda item: float(item["onset"]))
         return rows
+
+    def _annotations_from_pyblinker_events(self, frames: dict) -> list[dict[str, str]]:
+        events = frames.get("events")
+        if events is None or not hasattr(events, "itertuples"):
+            return []
+
+        srate = self._pyblinker_sample_rate(frames)
+        rows: list[dict[str, str]] = []
+        for event in events.itertuples(index=False):
+            event_data = event._asdict()
+            bounds = self._pyblinker_bounds(event_data, srate)
+            if bounds is None:
+                continue
+            left_frame, right_frame = bounds
+            onset = max(0.0, left_frame / srate)
+            duration = max(0.1, (right_frame - left_frame) / srate)
+            rows.append(
+                {
+                    "onset": f"{onset:.6f}",
+                    "duration": f"{duration:.6f}",
+                    "description": "blink",
+                }
+            )
+        rows.sort(key=lambda item: float(item["onset"]))
+        return rows
+
+    def _pyblinker_sample_rate(self, frames: dict) -> float:
+        metrics = frames.get("metrics")
+        if isinstance(metrics, dict):
+            value = self._numeric_value(metrics.get("sampling_rate_hz"))
+            if value is not None and value > 0:
+                return value
+        return self._blinker_sample_rate(frames)
+
+    def _pyblinker_bounds(
+        self, event: dict[str, object], srate: float
+    ) -> Optional[tuple[float, float]]:
+        for left_name, right_name in (
+            ("start_blink", "end_blink"),
+            ("left_base", "right_base"),
+            ("left_zero", "right_zero"),
+            ("outer_start", "outer_end"),
+        ):
+            left = self._numeric_value(event.get(left_name))
+            right = self._numeric_value(event.get(right_name))
+            if left is not None and right is not None and right > left:
+                return left, right
+
+        peak = self._numeric_value(event.get("max_blink"))
+        if peak is None:
+            peak = self._numeric_value(event.get("peak_time_blink"))
+        if peak is None:
+            return None
+        half_width = 0.15 * srate
+        return max(0.0, peak - half_width), peak + half_width
 
     def _blinker_sample_rate(self, frames: dict) -> float:
         for key in ("blinkStats", "params"):

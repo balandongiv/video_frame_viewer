@@ -76,6 +76,7 @@ ANNOTATION_PALETTE = [
 ]
 MIN_ANNOTATION_DURATION = 0.1
 ANNOTATION_NUDGE_FPS = 30.0
+ANNOTATION_RENDER_MARGIN_WINDOWS = 1.0
 DOWNSAMPLE_LOWPASS_HZ = 20.0
 DOWNSAMPLE_SFREQ = 40.0
 DOWNSAMPLE_CACHE_SUFFIX = "_ds20hz.fif"
@@ -174,6 +175,7 @@ class TimeSeriesViewer(QWidget):
         self._lane_baseline_kind: dict[pg.PlotWidget, str] = {}
         self._annotation_items_by_widget: dict[pg.PlotWidget, List[AnnotationItem]] = {}
         self._syncing_annotation_regions = False
+        self._annotation_render_range: Optional[tuple[float, float]] = None
         self._annotation_sample_scatter: Optional[pg.ScatterPlotItem] = None
         self._annotation_min_marker: Optional[pg.ScatterPlotItem] = None
 
@@ -558,6 +560,7 @@ class TimeSeriesViewer(QWidget):
         self.status_label.setText(f"[3/4] Rendering plot…")
         QApplication.processEvents()
         self._plot_data()
+        self._ensure_view_range(0.0)
         self.status_label.setText(f"[4/4] Loading annotations…")
         QApplication.processEvents()
         self._add_annotations_for_path(csv_path)
@@ -896,10 +899,9 @@ class TimeSeriesViewer(QWidget):
             return
 
         self._annotations = list(annotations)
-        for annotation in annotations:
-            self._render_annotation(annotation)
         self._update_annotation_filter_options()
         self._set_annotations_dirty(False)
+        self._refresh_visible_annotation_regions()
 
     def _load_annotations(self, csv_path: Path) -> List[Annotation]:
         if not csv_path.exists():
@@ -1232,6 +1234,7 @@ class TimeSeriesViewer(QWidget):
         for cursor_line in self._lane_cursor_lines.values():
             cursor_line.setPos(center)
             cursor_line.show()
+        self._refresh_visible_annotation_regions(x_min, x_max)
         self._update_lane_scales(x_min, x_max)
         self._update_annotation_count_label()
 
@@ -1268,6 +1271,7 @@ class TimeSeriesViewer(QWidget):
         self._selected_annotation = None
         self._auto_repair_original_bounds.clear()
         self._auto_repair_notes.clear()
+        self._annotation_render_range = None
         self._update_annotation_count_label()
 
     def _annotation_count_text(self) -> str:
@@ -1380,6 +1384,10 @@ class TimeSeriesViewer(QWidget):
     def _render_annotation(self, annotation: Annotation) -> None:
         if self._times is None or self._times.size == 0:
             return
+        if not self._annotation_in_render_range(annotation):
+            return
+        if self._annotation_has_regions(annotation):
+            return
 
         data_end = float(self._times[-1])
         start = max(0.0, annotation.onset)
@@ -1425,6 +1433,65 @@ class TimeSeriesViewer(QWidget):
             lane_item = AnnotationItem(annotation=annotation, region=region)
             self._annotation_items_by_widget[widget].append(lane_item)
             self._connect_annotation_region(lane_item)
+
+    def _annotation_has_regions(self, annotation: Annotation) -> bool:
+        return any(
+            item.annotation is annotation
+            for items in self._annotation_items_by_widget.values()
+            for item in items
+        )
+
+    def _annotation_in_render_range(self, annotation: Annotation) -> bool:
+        if self._annotation_render_range is None:
+            return True
+        render_start, render_end = self._annotation_render_range
+        annotation_start = annotation.onset
+        annotation_end = annotation.onset + annotation.duration
+        return annotation_start <= render_end and annotation_end >= render_start
+
+    def _refresh_visible_annotation_regions(
+        self, x_min: Optional[float] = None, x_max: Optional[float] = None
+    ) -> None:
+        if self._times is None or self._times.size == 0:
+            return
+        if x_min is None or x_max is None:
+            x_min, x_max = self._current_view_range()
+        if x_min is None or x_max is None:
+            return
+
+        margin = max(self.view_span_seconds * ANNOTATION_RENDER_MARGIN_WINDOWS, 1.0)
+        self._annotation_render_range = (
+            max(0.0, x_min - margin),
+            min(float(self._times[-1]), x_max + margin),
+        )
+        visible_annotations = {
+            annotation
+            for annotation in self._annotations
+            if self._annotation_in_render_range(annotation)
+        }
+
+        for widget, items in self._annotation_items_by_widget.items():
+            for item in list(items):
+                if item.annotation in visible_annotations:
+                    continue
+                self._annotation_by_region.pop(item.region, None)
+                widget.removeItem(item.region)
+                items.remove(item)
+
+        for annotation in self._annotations:
+            if annotation in visible_annotations:
+                self._render_annotation(annotation)
+        self._apply_annotation_filter()
+
+    def _current_view_range(self) -> tuple[Optional[float], Optional[float]]:
+        view_box = self.plot_widget.getPlotItem().getViewBox()
+        if view_box is None:
+            return None, None
+        view_range = view_box.viewRange()
+        if not view_range:
+            return None, None
+        x_min, x_max = view_range[0]
+        return float(x_min), float(x_max)
 
     def _set_annotations_dirty(self, dirty: bool) -> None:
         self._annotations_dirty = dirty
@@ -1615,6 +1682,10 @@ class TimeSeriesViewer(QWidget):
                     item.region.setRegion([onset, end])
         finally:
             self._syncing_annotation_regions = False
+        if self._annotation_in_render_range(annotation):
+            self._render_annotation(annotation)
+        else:
+            self._remove_annotation_regions(annotation)
 
     def _edit_annotation_description(self, annotation_item: AnnotationItem) -> None:
         description = self._prompt_for_description(
@@ -2765,18 +2836,8 @@ class TimeSeriesViewer(QWidget):
                 line.setPen(pen)
 
     def _current_annotations_for_save(self) -> List[Annotation]:
-        items = self._annotation_items_by_widget.get(self.plot_widget, [])
-        annotations: List[Annotation] = []
-        for item in items:
-            if item.annotation not in self._annotations:
-                continue
-            start, end = item.region.getRegion()
-            onset, duration = self._normalize_region_values(start, end)
-            item.annotation.onset = onset
-            item.annotation.duration = duration
-            if item.annotation.description:
-                annotations.append(item.annotation)
-        self._annotations = list(annotations)
+        annotations = [annotation for annotation in self._annotations if annotation.description]
+        self._annotations = annotations
         return annotations
 
     def _write_annotations_csv(self, csv_path: Path, annotations: List[Annotation]) -> int:
@@ -2873,7 +2934,12 @@ class TimeSeriesViewer(QWidget):
                 self._delete_annotation(annotation_item)
                 return
 
-        self.status_label.setText("Selected annotation is not available to delete.")
+        self._remove_annotation_from_model(annotation)
+        self._remove_annotation_regions(annotation)
+        self._selected_annotation = None
+        self._set_annotations_dirty(True)
+        self._update_annotation_filter_options()
+        self.status_label.setText("Annotation deleted.")
 
     def _remove_annotation_regions(self, annotation: Annotation) -> None:
         for widget, items in self._annotation_items_by_widget.items():
@@ -3420,16 +3486,12 @@ class TimeSeriesViewer(QWidget):
         self._apply_annotation_filter()
 
     def _sync_lane_annotations(self) -> None:
-        if not self._annotations:
-            return
         for widget, items in self._annotation_items_by_widget.items():
             for item in items:
                 widget.removeItem(item.region)
             items.clear()
         self._annotation_by_region.clear()
-        for annotation in self._annotations:
-            self._render_annotation(annotation)
-        self._apply_annotation_filter()
+        self._refresh_visible_annotation_regions()
 
     def _register_lane_widget(self, widget: pg.PlotWidget, cursor_line: pg.InfiniteLine) -> None:
         if widget not in self._lane_widgets:
