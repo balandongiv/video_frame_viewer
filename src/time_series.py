@@ -3157,7 +3157,7 @@ class TimeSeriesViewer(QWidget):
             self._handle_annotation_context_menu(pos)
             return
 
-        annotation = self._merge_annotation(onset, duration, "blink")
+        annotation = self._merge_annotation(onset, duration, "eye_blink")
         self._set_selected_annotation(annotation, announce=False)
         self._set_annotations_dirty(True)
         self._update_annotation_filter_options()
