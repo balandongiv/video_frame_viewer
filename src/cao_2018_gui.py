@@ -124,7 +124,7 @@ def ensure_cao_session_file(folder: Path) -> Path:
 class Cao2018Viewer(QMainWindow):
     """Standalone FIF review UI for the Cao 2018 sustained-attention driving dataset."""
 
-    DEFAULT_STEP_SECONDS = 1.0
+    DEFAULT_STEP_SECONDS = 20.0
     RECORDINGS_PANEL_WIDTH = 300
     RECORDINGS_PANEL_MAX_WIDTH = 340
     DETACHED_PANEL_MAX_WIDTH = 16777215
@@ -1118,6 +1118,10 @@ class Cao2018Viewer(QMainWindow):
         self.delete_annotation_shortcut = QShortcut(QKeySequence(Qt.Key_D), self)
         self.delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.delete_annotation_shortcut.activated.connect(self._delete_annotation_if_allowed)
+
+        self.delete_annotation_shortcut_slash = QShortcut(QKeySequence(Qt.Key_Slash), self)
+        self.delete_annotation_shortcut_slash.setContext(Qt.WidgetWithChildrenShortcut)
+        self.delete_annotation_shortcut_slash.activated.connect(self._delete_annotation_if_allowed)
 
         self.play_shortcut = QShortcut(QKeySequence(Qt.Key_P), self)
         self.play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
