@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QShortcut,
     QSizePolicy,
     QSplitter,
@@ -42,6 +43,13 @@ from time_series import TimeSeriesViewer
 
 DEFAULT_CAO_ROOT = Path(r"D:\dataset\sustained_attention_driving")
 CAO_DEFAULT_CHANNELS = {"fp1", "fp2"}
+_STATUSES = ["Pending", "Ongoing", "Complete", "Issue"]
+_STATUS_COLORS = {
+    "Pending": "#9e9e9e",
+    "Ongoing": "#1976d2",
+    "Complete": "#388e3c",
+    "Issue": "#d32f2f",
+}
 
 
 class CaoTimeSeriesViewer(TimeSeriesViewer):
@@ -225,10 +233,12 @@ class Cao2018Viewer(QMainWindow):
         channels_tab.setLayout(channels_layout)
 
         summary_tab = self._build_summary_tab()
+        statistics_tab = self._build_statistics_tab()
 
         tabs.addTab(recordings_tab, "Recordings")
         tabs.addTab(channels_tab, "Channels")
         tabs.addTab(summary_tab, "Summary")
+        tabs.addTab(statistics_tab, "Statistics")
         tabs.currentChanged.connect(self._apply_side_tab_mode)
         return tabs
 
@@ -303,7 +313,7 @@ class Cao2018Viewer(QMainWindow):
         self.current_time_label = QLabel("Current time: -")
 
         self.window_dropdown = QComboBox()
-        self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s"])
+        self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s", "40 s", "50 s", "60 s"])
         self.window_dropdown.currentIndexChanged.connect(self._on_window_changed)
 
         layout.addWidget(QLabel("Time (s):"), 0, 0)
@@ -407,6 +417,102 @@ class Cao2018Viewer(QMainWindow):
         layout.addStretch()
         summary_tab.setLayout(layout)
         return summary_tab
+
+    def _build_statistics_tab(self) -> QWidget:
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        tab = QWidget()
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
+
+        refresh_btn = QPushButton("Refresh Statistics")
+        refresh_btn.clicked.connect(self._refresh_statistics_tab)
+        outer_layout.addWidget(refresh_btn)
+
+        self._stats_overall_fig = Figure(figsize=(6, 3.5), tight_layout=True)
+        self._stats_overall_canvas = FigureCanvasQTAgg(self._stats_overall_fig)
+        self._stats_overall_canvas.setMinimumHeight(260)
+
+        self._stats_subject_fig = Figure(figsize=(6, 4), tight_layout=True)
+        self._stats_subject_canvas = FigureCanvasQTAgg(self._stats_subject_fig)
+        self._stats_subject_canvas.setMinimumHeight(320)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner_layout = QVBoxLayout()
+        inner_layout.setContentsMargins(4, 4, 4, 4)
+        inner_layout.setSpacing(4)
+        inner_layout.addWidget(QLabel("Overall Status Distribution"))
+        inner_layout.addWidget(self._stats_overall_canvas)
+        inner_layout.addWidget(QLabel("Status by Subject"))
+        inner_layout.addWidget(self._stats_subject_canvas)
+        inner_layout.addStretch()
+        inner.setLayout(inner_layout)
+        scroll.setWidget(inner)
+
+        outer_layout.addWidget(scroll)
+        tab.setLayout(outer_layout)
+        return tab
+
+    def _refresh_statistics_tab(self) -> None:
+        if not hasattr(self, "_stats_overall_fig"):
+            return
+        status_counts: dict[str, int] = {s: 0 for s in _STATUSES}
+        subject_counts: dict[str, dict[str, int]] = {}
+        for recording in self.recordings:
+            status = self._status_for_recording(recording)
+            status_counts[status] = status_counts.get(status, 0) + 1
+            subj = recording.subject_id
+            if subj not in subject_counts:
+                subject_counts[subj] = {s: 0 for s in _STATUSES}
+            subject_counts[subj][status] += 1
+        self._draw_overall_pie(status_counts)
+        self._draw_subject_bars(subject_counts)
+
+    def _draw_overall_pie(self, status_counts: dict[str, int]) -> None:
+        fig = self._stats_overall_fig
+        fig.clear()
+        ax = fig.add_subplot(111)
+        total = sum(status_counts.values())
+        labels = [s for s in _STATUSES if status_counts.get(s, 0) > 0]
+        sizes = [status_counts[s] for s in labels]
+        colors = [_STATUS_COLORS[s] for s in labels]
+        if total == 0:
+            ax.text(0.5, 0.5, "No recordings", ha="center", va="center", transform=ax.transAxes)
+        else:
+            def _fmt(pct: float) -> str:
+                n = int(round(pct * total / 100))
+                return f"{pct:.0f}%\n({n})"
+            ax.pie(sizes, labels=labels, colors=colors, autopct=_fmt, startangle=90)
+        ax.set_title(f"Overall Status  (n={total})")
+        fig.tight_layout()
+        self._stats_overall_canvas.draw()
+
+    def _draw_subject_bars(self, subject_counts: dict[str, dict[str, int]]) -> None:
+        fig = self._stats_subject_fig
+        fig.clear()
+        if not subject_counts:
+            self._stats_subject_canvas.draw()
+            return
+        subjects = sorted(subject_counts.keys(), key=lambda x: self._subject_sort_key(x))
+        n = len(subjects)
+        canvas_height = max(320, n * 28 + 80)
+        self._stats_subject_canvas.setMinimumHeight(canvas_height)
+        ax = fig.add_subplot(111)
+        bottoms = [0.0] * n
+        for status in _STATUSES:
+            vals = [float(subject_counts[s].get(status, 0)) for s in subjects]
+            if any(v > 0 for v in vals):
+                ax.barh(subjects, vals, left=bottoms, label=status, color=_STATUS_COLORS[status])
+                bottoms = [b + v for b, v in zip(bottoms, vals)]
+        ax.set_xlabel("Sessions")
+        ax.set_title("Status by Subject")
+        ax.legend(loc="lower right", fontsize=8)
+        fig.tight_layout()
+        self._stats_subject_canvas.draw()
 
     def _browse_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
@@ -864,6 +970,7 @@ class Cao2018Viewer(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.summary_table.setItem(row, col, item)
+        self._refresh_statistics_tab()
 
     def _status_for_recording(self, recording: CaoRecording) -> str:
         if not recording.session_path.exists():
@@ -952,7 +1059,7 @@ class Cao2018Viewer(QMainWindow):
         )
 
     def _on_window_changed(self, index: int) -> None:
-        spans = [5.0, 10.0, 15.0, 30.0]
+        spans = [5.0, 10.0, 15.0, 30.0, 40.0, 50.0, 60.0]
         span = spans[index]
         viewer = self.time_series_viewer
         viewer.view_span_seconds = span

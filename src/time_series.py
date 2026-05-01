@@ -741,11 +741,14 @@ class TimeSeriesViewer(QWidget):
             line_color.setAlphaF(0.3)
             line_pen = pg.mkPen(line_color, width=1)
             line_curve = widget.plot(times, channel, pen=line_pen)
+            line_curve.setDownsampling(auto=True, method="peak")
+            line_curve.setClipToView(True)
             widget.addItem(scatter)
             curves_to_add.extend([line_curve, scatter])
         else:
             curve = widget.plot(times, channel, pen=self._pen_for_channel(channel_name, 0))
             curve.setDownsampling(auto=True, method="peak")
+            curve.setClipToView(True)
             curves_to_add.append(curve)
         self._lane_curves[widget].extend(curves_to_add)
         self._lane_series[widget] = (times, channel)
@@ -1320,7 +1323,7 @@ class TimeSeriesViewer(QWidget):
             self._adjust_zoom(multiplier, anchor_time=anchor_time)
             return True
         if obj in self._plot_viewports() and event.type() == QEvent.MouseButtonPress:
-            if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.ControlModifier):
+            if event.button() == Qt.RightButton and not (event.modifiers() & Qt.ControlModifier):
                 widget = self._widget_for_viewport(obj)
                 t = self._time_at_position(event.pos(), widget)
                 if t is not None and self._times is not None and self._times.size > 0:
@@ -1328,11 +1331,11 @@ class TimeSeriesViewer(QWidget):
 
         if obj is self.plot_widget.viewport():
             if event.type() == QEvent.MouseButtonPress:
-                if event.button() == Qt.RightButton:
+                if event.button() == Qt.LeftButton:
                     self._start_annotation_drag(event.pos())
                     self._annotation_drag_right = True
                     return True
-                if event.button() == Qt.LeftButton:
+                if event.button() == Qt.RightButton:
                     if event.modifiers() & Qt.ControlModifier:
                         self._start_annotation_drag(event.pos())
                         return True
@@ -1343,10 +1346,10 @@ class TimeSeriesViewer(QWidget):
                 self._update_annotation_drag(event.pos())
                 return True
             if event.type() == QEvent.MouseButtonRelease and self._annotation_dragging:
-                if event.button() == Qt.LeftButton:
+                if event.button() == Qt.RightButton:
                     self._finalize_annotation_drag(event.pos())
                     return True
-                if event.button() == Qt.RightButton and self._annotation_drag_right:
+                if event.button() == Qt.LeftButton and self._annotation_drag_right:
                     self._finalize_annotation_drag_blink(event.pos())
                     return True
 
@@ -3136,7 +3139,7 @@ class TimeSeriesViewer(QWidget):
         self._reset_annotation_drag()
 
     def _finalize_annotation_drag_blink(self, pos) -> None:
-        """Finalize a right-button drag as a 'blink' annotation without a dialog."""
+        """Finalize a left-button drag as a 'blink' annotation without a dialog."""
         if self._annotation_drag_start is None or self._times is None:
             self._reset_annotation_drag()
             return
@@ -3152,7 +3155,7 @@ class TimeSeriesViewer(QWidget):
         duration = abs(end - start)
 
         if duration < MIN_ANNOTATION_DURATION:
-            # Negligible drag — treat as a plain right-click and show context menu.
+            # Negligible drag — treat as a plain left-click and show context menu.
             self._reset_annotation_drag()
             self._handle_annotation_context_menu(pos)
             return
