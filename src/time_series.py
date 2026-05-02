@@ -153,6 +153,7 @@ class TimeSeriesViewer(QWidget):
         self._annotation_drag_right = False
         self._annotation_drag_start: Optional[float] = None
         self._annotation_drag_preview: Optional[pg.LinearRegionItem] = None
+        self._left_press_annotation: Optional[AnnotationItem] = None
         self._last_annotation_description = ""
         self._annotation_filter_value = self.FILTER_ALL
         self._selected_annotation: Optional[Annotation] = None
@@ -1332,6 +1333,7 @@ class TimeSeriesViewer(QWidget):
         if obj is self.plot_widget.viewport():
             if event.type() == QEvent.MouseButtonPress:
                 if event.button() == Qt.LeftButton:
+                    self._left_press_annotation = self._annotation_item_at(event.pos())
                     self._start_annotation_drag(event.pos())
                     self._annotation_drag_right = True
                     return True
@@ -1339,18 +1341,20 @@ class TimeSeriesViewer(QWidget):
                     if event.modifiers() & Qt.ControlModifier:
                         self._start_annotation_drag(event.pos())
                         return True
-                    annotation_item = self._annotation_item_at(event.pos())
-                    if annotation_item is not None:
-                        self._set_selected_annotation(annotation_item.annotation)
+                    return True  # Consume press; context menu shown on release
             if event.type() == QEvent.MouseMove and self._annotation_dragging:
                 self._update_annotation_drag(event.pos())
                 return True
-            if event.type() == QEvent.MouseButtonRelease and self._annotation_dragging:
-                if event.button() == Qt.RightButton:
-                    self._finalize_annotation_drag(event.pos())
-                    return True
-                if event.button() == Qt.LeftButton and self._annotation_drag_right:
-                    self._finalize_annotation_drag_blink(event.pos())
+            if event.type() == QEvent.MouseButtonRelease:
+                if self._annotation_dragging:
+                    if event.button() == Qt.RightButton:
+                        self._finalize_annotation_drag(event.pos())
+                        return True
+                    if event.button() == Qt.LeftButton and self._annotation_drag_right:
+                        self._finalize_annotation_drag_blink(event.pos())
+                        return True
+                if event.button() == Qt.RightButton and not self._annotation_dragging:
+                    self._handle_annotation_context_menu(event.pos())
                     return True
 
         return super().eventFilter(obj, event)
@@ -3139,7 +3143,7 @@ class TimeSeriesViewer(QWidget):
         self._reset_annotation_drag()
 
     def _finalize_annotation_drag_blink(self, pos) -> None:
-        """Finalize a left-button drag as a 'blink' annotation without a dialog."""
+        """Finalize a left-button drag as a 'blink' annotation without a dialog; negligible drags are ignored."""
         if self._annotation_drag_start is None or self._times is None:
             self._reset_annotation_drag()
             return
@@ -3155,9 +3159,11 @@ class TimeSeriesViewer(QWidget):
         duration = abs(end - start)
 
         if duration < MIN_ANNOTATION_DURATION:
-            # Negligible drag — treat as a plain left-click and show context menu.
+            pressed_item = self._left_press_annotation
+            self._left_press_annotation = None
             self._reset_annotation_drag()
-            self._handle_annotation_context_menu(pos)
+            if pressed_item is not None:
+                self._set_selected_annotation(pressed_item.annotation)
             return
 
         annotation = self._merge_annotation(onset, duration, "eye_blink")
@@ -3222,6 +3228,7 @@ class TimeSeriesViewer(QWidget):
         self._annotation_dragging = False
         self._annotation_drag_right = False
         self._annotation_drag_start = None
+        self._left_press_annotation = None
         if self._annotation_drag_preview is not None:
             self.plot_widget.removeItem(self._annotation_drag_preview)
             self._annotation_drag_preview = None

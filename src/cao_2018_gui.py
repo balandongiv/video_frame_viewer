@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QKeySequence, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -82,6 +82,8 @@ class CaoTimeSeriesViewer(TimeSeriesViewer):
 
 
 SESSION_FILENAME = "Cao2018Viewer.yaml"
+EPOCH_HEALTH_FILENAME = "epoch_health.csv"
+EPOCH_WINDOW_SECONDS = 30.0
 BLINKER_PICKLE = "blinker_results.pkl"
 DEFAULT_SESSION_STATE = {
     "stop_position": 0.0,
@@ -112,6 +114,10 @@ class CaoRecording:
         return self.folder / BLINKER_PICKLE
 
     @property
+    def epoch_health_path(self) -> Path:
+        return self.folder / EPOCH_HEALTH_FILENAME
+
+    @property
     def session_path(self) -> Path:
         return self.folder / SESSION_FILENAME
 
@@ -129,6 +135,76 @@ def ensure_cao_session_file(folder: Path) -> Path:
     return session_path
 
 
+class EpochTimelineWidget(QWidget):
+    """Horizontal mini-timeline showing 30-second epoch health states.
+
+    Each epoch is drawn as a coloured block: green (Good), red (Bad), or grey (unlabelled).
+    The current epoch receives a dark border.  Click any block to jump to that epoch.
+    """
+
+    epoch_clicked = pyqtSignal(int)
+
+    _FILL = {"Good": "#4caf50", "Bad": "#f44336", "": "#bdbdbd"}
+    _BORDER = "#212121"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._total = 0
+        self._states: list[str] = []
+        self._current = 0
+        self.setFixedHeight(36)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_data(self, total: int, states: list[str], current: int) -> None:
+        self._total = total
+        self._states = list(states)
+        self._current = current
+        self.update()
+
+    def _block_rect(self, i: int) -> tuple[int, int, int, int]:
+        w = self.width()
+        x = int(i * w / self._total)
+        x2 = int((i + 1) * w / self._total)
+        return x, 2, max(1, x2 - x - 1), self.height() - 4
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        if self._total == 0:
+            painter.end()
+            return
+        for i in range(self._total):
+            state = self._states[i] if i < len(self._states) else ""
+            x, y, rw, rh = self._block_rect(i)
+            painter.fillRect(x, y, rw, rh, QColor(self._FILL.get(state, self._FILL[""])))
+            if rw >= 18:
+                painter.setPen(QColor("#ffffff") if state else QColor("#616161"))
+                f = painter.font()
+                f.setPixelSize(9)
+                painter.setFont(f)
+                painter.drawText(x, y, rw, rh, Qt.AlignCenter, str(i))
+            if i == self._current:
+                painter.setPen(QPen(QColor(self._BORDER), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(x + 1, y + 1, max(0, rw - 2), max(0, rh - 2))
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self._total == 0 or event.button() != Qt.LeftButton:
+            return
+        i = max(0, min(self._total - 1, int(event.x() / max(1, self.width()) * self._total)))
+        self.epoch_clicked.emit(i)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._total == 0:
+            self.setToolTip("")
+            return
+        i = max(0, min(self._total - 1, int(event.x() / max(1, self.width()) * self._total)))
+        state = self._states[i] if i < len(self._states) else ""
+        s0, s1 = i * EPOCH_WINDOW_SECONDS, (i + 1) * EPOCH_WINDOW_SECONDS
+        self.setToolTip(f"Epoch {i}  ({s0:.0f}s – {s1:.0f}s)  [{state or 'unlabelled'}]")
+
+
 class Cao2018Viewer(QMainWindow):
     """Standalone FIF review UI for the Cao 2018 sustained-attention driving dataset."""
 
@@ -144,6 +220,7 @@ class Cao2018Viewer(QMainWindow):
         self.recordings: list[CaoRecording] = []
         self.current_recording: Optional[CaoRecording] = None
         self.status_value = "Pending"
+        self._epoch_health_mode = False
 
         self.time_series_viewer = CaoTimeSeriesViewer()
 
@@ -173,8 +250,28 @@ class Cao2018Viewer(QMainWindow):
         self.side_tabs = self._build_side_tabs()
         self.time_series_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        self.epoch_health_label = QLabel("")
+        self.epoch_health_label.setAlignment(Qt.AlignCenter)
+        self.epoch_health_label.setFixedHeight(24)
+
+        self.epoch_timeline_widget = EpochTimelineWidget()
+        self.epoch_timeline_widget.epoch_clicked.connect(self._on_epoch_timeline_clicked)
+        self.epoch_timeline_widget.setVisible(False)
+
+        ts_container = QWidget()
+        ts_layout = QVBoxLayout()
+        ts_layout.setContentsMargins(0, 0, 0, 0)
+        ts_layout.setSpacing(0)
+        ts_layout.addWidget(self.epoch_health_label)
+        ts_layout.addWidget(self.epoch_timeline_widget)
+        ts_layout.addWidget(self.time_series_viewer)
+        ts_layout.setStretch(0, 0)
+        ts_layout.setStretch(1, 0)
+        ts_layout.setStretch(2, 1)
+        ts_container.setLayout(ts_layout)
+
         self.main_splitter.addWidget(self.side_tabs)
-        self.main_splitter.addWidget(self.time_series_viewer)
+        self.main_splitter.addWidget(ts_container)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
         main_layout.addWidget(self.main_splitter)
@@ -360,6 +457,14 @@ class Cao2018Viewer(QMainWindow):
         forward_play_layout.addWidget(self.forward_play_speed_spinbox)
         layout.addLayout(forward_play_layout, 7, 0, 1, 3)
 
+        self.epoch_health_mode_button = QPushButton("Epoch Health Mode")
+        self.epoch_health_mode_button.setCheckable(True)
+        self.epoch_health_mode_button.setToolTip(
+            "Lock step and window to 30 s and show the epoch health timeline"
+        )
+        self.epoch_health_mode_button.toggled.connect(self._toggle_epoch_health_mode)
+        layout.addWidget(self.epoch_health_mode_button, 8, 0, 1, 3)
+
         return control_group
 
     def _build_summary_tab(self) -> QWidget:
@@ -371,7 +476,13 @@ class Cao2018Viewer(QMainWindow):
         self.summary_fif_label = QLabel("FIF: (none selected)")
         self.summary_csv_label = QLabel("CSV: (not loaded)")
         self.summary_blinker_label = QLabel("Blinker: (not loaded)")
-        for label in (self.summary_fif_label, self.summary_csv_label, self.summary_blinker_label):
+        self.summary_epoch_health_label = QLabel("Epoch Health: (none selected)")
+        for label in (
+            self.summary_fif_label,
+            self.summary_csv_label,
+            self.summary_blinker_label,
+            self.summary_epoch_health_label,
+        ):
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setWordWrap(True)
 
@@ -411,6 +522,7 @@ class Cao2018Viewer(QMainWindow):
         layout.addWidget(self.summary_fif_label)
         layout.addWidget(self.summary_csv_label)
         layout.addWidget(self.summary_blinker_label)
+        layout.addWidget(self.summary_epoch_health_label)
         layout.addWidget(self.summary_overall_label)
         layout.addWidget(self.summary_table)
         layout.addWidget(remark_group)
@@ -535,6 +647,7 @@ class Cao2018Viewer(QMainWindow):
         self.time_series_viewer.load_time_series_file(None)
         self._update_review_controls(False)
         self._update_selected_summary(None)
+        self._update_epoch_health_label()
 
         if not dataset_root.exists():
             self._set_status(f"Cao 2018 dataset root not found at {dataset_root}.")
@@ -623,6 +736,7 @@ class Cao2018Viewer(QMainWindow):
         self._refresh_current_list_item()
         self._load_session_state()
         self._refresh_dataset_summary()
+        self._update_epoch_health_label()
 
         if loaded:
             self._set_status(f"Loaded Cao 2018 recording {recording.display_name}.")
@@ -850,8 +964,27 @@ class Cao2018Viewer(QMainWindow):
         if self.current_recording is None:
             self._set_status("Load a recording before navigating.")
             return
-        step = self.step_seconds_input.value() * (1 if direction > 0 else -1)
-        self._goto_time(self.time_series_viewer.current_cursor_time() + step)
+        if self._epoch_health_mode:
+            current_epoch = int(
+                self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+            )
+            target_epoch = max(0, current_epoch + (1 if direction > 0 else -1))
+            self._goto_epoch(target_epoch)
+        else:
+            step = self.step_seconds_input.value() * (1 if direction > 0 else -1)
+            self._goto_time(self.time_series_viewer.current_cursor_time() + step)
+
+    def _goto_epoch(self, epoch_index: int) -> None:
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        # Always lock the viewer span to exactly one epoch window, even if the
+        # user previously zoomed (Ctrl+scroll) while in epoch health mode.
+        viewer = self.time_series_viewer
+        viewer.view_span_seconds = EPOCH_WINDOW_SECONDS
+        viewer.default_view_span_seconds = EPOCH_WINDOW_SECONDS
+        self._goto_time(epoch_start + EPOCH_WINDOW_SECONDS / 2)
+        # Windows 11 defers the pyqtgraph paint event until the next resize;
+        # flush it now so the view updates immediately after every step.
+        QApplication.processEvents()
 
     def _goto_time(self, seconds: float) -> None:
         if self.current_recording is None:
@@ -859,6 +992,7 @@ class Cao2018Viewer(QMainWindow):
             return
         self.time_series_viewer.seek_time(max(0.0, seconds))
         self._update_current_time_label()
+        self._update_epoch_health_label()
         self._set_status(f"Displaying time {self.time_series_viewer.current_cursor_time():.3f}s.")
 
     def _update_current_time_label(self) -> None:
@@ -901,6 +1035,11 @@ class Cao2018Viewer(QMainWindow):
             widget.setEnabled(enabled)
         if not enabled:
             self.current_time_label.setText("Current time: -")
+        elif self._epoch_health_mode:
+            self.step_seconds_input.setEnabled(False)
+            self.step_dec_button.setEnabled(False)
+            self.step_inc_button.setEnabled(False)
+            self.window_dropdown.setEnabled(False)
 
     def _update_selected_summary(
         self,
@@ -912,6 +1051,7 @@ class Cao2018Viewer(QMainWindow):
             self.summary_fif_label.setText("FIF: (none selected)")
             self.summary_csv_label.setText("CSV: (not loaded)")
             self.summary_blinker_label.setText("Blinker: (not loaded)")
+            self.summary_epoch_health_label.setText("Epoch Health: (none selected)")
             return
 
         self.summary_fif_label.setText(
@@ -923,6 +1063,27 @@ class Cao2018Viewer(QMainWindow):
         self.summary_blinker_label.setText(
             self._format_path_line("Blinker", recording.blinker_path, recording.blinker_path.exists())
         )
+        self.summary_epoch_health_label.setText(
+            self._format_epoch_health_summary(recording)
+        )
+
+    def _format_epoch_health_summary(self, recording: "CaoRecording") -> str:
+        csv_path = recording.epoch_health_path
+        exists = csv_path.exists()
+        if not exists:
+            return f"Epoch Health: {csv_path} [missing]"
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            good = sum(1 for r in rows if r.get("health") == "Good")
+            bad = sum(1 for r in rows if r.get("health") == "Bad")
+            total = len(rows)
+            return (
+                f"Epoch Health: {csv_path} [found, {total} epoch(s): "
+                f"{good} Good, {bad} Bad]"
+            )
+        except Exception:
+            return f"Epoch Health: {csv_path} [found, unreadable]"
 
     def _format_path_line(self, label: str, path: Path, loaded: bool, extra: str = "") -> str:
         exists = "found" if path.exists() else "missing"
@@ -1246,6 +1407,14 @@ class Cao2018Viewer(QMainWindow):
         self.stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.stop_shortcut.activated.connect(self._stop_all_play)
 
+        self.epoch_good_shortcut = QShortcut(QKeySequence(Qt.Key_J), self)
+        self.epoch_good_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.epoch_good_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("Good"))
+
+        self.epoch_bad_shortcut = QShortcut(QKeySequence(Qt.Key_K), self)
+        self.epoch_bad_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.epoch_bad_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("Bad"))
+
         self.time_series_viewer.annotation_jump_requested.connect(self._on_annotation_jump)
 
     def _step_if_allowed(self, direction: int) -> None:
@@ -1263,6 +1432,195 @@ class Cao2018Viewer(QMainWindow):
     def _on_annotation_jump(self, seconds: float) -> None:
         self._update_current_time_label()
         self._set_status(f"Jumped to annotation at {seconds:.3f}s.")
+
+    def _update_epoch_health_label(self) -> None:
+        if self.current_recording is None:
+            self.epoch_health_label.setText("")
+            self.epoch_health_label.setStyleSheet("")
+            self._update_epoch_timeline()
+            return
+
+        current_time = self.time_series_viewer.current_cursor_time()
+        epoch_index = int(current_time // EPOCH_WINDOW_SECONDS)
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
+
+        health = self._read_epoch_health(self.current_recording, epoch_index)
+        if health == "Good":
+            self.epoch_health_label.setStyleSheet(
+                "background-color: #c8e6c9; color: #1b5e20; font-weight: bold; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(
+                f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)  ✓ Good"
+            )
+        elif health == "Bad":
+            self.epoch_health_label.setStyleSheet(
+                "background-color: #ffcdd2; color: #b71c1c; font-weight: bold; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(
+                f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)  ✗ Bad"
+            )
+        else:
+            self.epoch_health_label.setStyleSheet(
+                "background-color: #f5f5f5; color: #616161; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(
+                f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)  — unlabelled  [J = Good, K = Bad]"
+            )
+        self._update_epoch_timeline()
+
+    def _read_epoch_health(self, recording: "CaoRecording", epoch_index: int) -> str:
+        csv_path = recording.epoch_health_path
+        if not csv_path.exists():
+            return ""
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if (row.get("subject_id") == recording.subject_id
+                            and row.get("session_id") == recording.session_id
+                            and row.get("epoch_index") == str(epoch_index)):
+                        return row.get("health", "")
+        except Exception:
+            pass
+        return ""
+
+    def _log_epoch_health_if_allowed(self, health: str) -> None:
+        if self._shortcut_allowed():
+            self._log_epoch_health(health)
+
+    def _log_epoch_health(self, health: str) -> None:
+        if self.current_recording is None:
+            self._set_status("Load a recording before logging epoch health.")
+            return
+
+        current_time = self.time_series_viewer.current_cursor_time()
+        epoch_index = int(current_time // EPOCH_WINDOW_SECONDS)
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
+
+        recording = self.current_recording
+        csv_path = recording.epoch_health_path
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        rows: list[dict] = []
+        if csv_path.exists():
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as f:
+                    rows = list(csv.DictReader(f))
+            except Exception:
+                rows = []
+
+        updated = False
+        for row in rows:
+            if (row.get("subject_id") == recording.subject_id
+                    and row.get("session_id") == recording.session_id
+                    and row.get("epoch_index") == str(epoch_index)):
+                row["health"] = health
+                row["timestamp"] = timestamp
+                updated = True
+                break
+
+        if not updated:
+            rows.append({
+                "subject_id": recording.subject_id,
+                "session_id": recording.session_id,
+                "epoch_index": str(epoch_index),
+                "epoch_start_s": f"{epoch_start:.3f}",
+                "epoch_end_s": f"{epoch_end:.3f}",
+                "health": health,
+                "timestamp": timestamp,
+            })
+
+        rows.sort(key=lambda r: (r.get("subject_id", ""), r.get("session_id", ""), int(r.get("epoch_index", 0))))
+
+        fieldnames = ["subject_id", "session_id", "epoch_index", "epoch_start_s", "epoch_end_s", "health", "timestamp"]
+        try:
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as exc:
+            self._set_status(f"Failed to save epoch health: {exc}")
+            return
+
+        self._update_epoch_health_label()
+        if self.current_recording is not None:
+            self.summary_epoch_health_label.setText(
+                self._format_epoch_health_summary(self.current_recording)
+            )
+        self._set_status(
+            f"Epoch {epoch_index} ({epoch_start:.0f}s–{epoch_end:.0f}s) marked as {health}."
+        )
+
+    def _toggle_epoch_health_mode(self, checked: bool) -> None:
+        self._epoch_health_mode = checked
+        if checked:
+            self._pre_mode_step = self.step_seconds_input.value()
+            self._pre_mode_window_index = self.window_dropdown.currentIndex()
+            self.step_seconds_input.setValue(EPOCH_WINDOW_SECONDS)
+            self.window_dropdown.setCurrentIndex(3)  # 30 s
+            # Explicitly reset span in case the dropdown was already at index 3
+            # (currentIndexChanged won't fire when the index doesn't change).
+            self.time_series_viewer.view_span_seconds = EPOCH_WINDOW_SECONDS
+            self.time_series_viewer.default_view_span_seconds = EPOCH_WINDOW_SECONDS
+            self.step_seconds_input.setEnabled(False)
+            self.step_dec_button.setEnabled(False)
+            self.step_inc_button.setEnabled(False)
+            self.window_dropdown.setEnabled(False)
+            self.epoch_health_mode_button.setText("Exit Epoch Mode")
+            current_epoch = int(
+                self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+            )
+            self._goto_epoch(current_epoch)
+            self._set_status("Epoch Health Mode active — step and window locked to 30 s.")
+        else:
+            self.step_seconds_input.setValue(
+                getattr(self, "_pre_mode_step", self.DEFAULT_STEP_SECONDS)
+            )
+            self.window_dropdown.setCurrentIndex(
+                getattr(self, "_pre_mode_window_index", 0)
+            )
+            self.step_seconds_input.setEnabled(True)
+            self.step_dec_button.setEnabled(True)
+            self.step_inc_button.setEnabled(True)
+            self.window_dropdown.setEnabled(True)
+            self.epoch_health_mode_button.setText("Epoch Health Mode")
+            self._set_status("Epoch Health Mode disabled.")
+        self._update_epoch_timeline()
+
+    def _update_epoch_timeline(self) -> None:
+        if not self._epoch_health_mode or self.current_recording is None:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        duration = self.time_series_viewer.signal_duration_seconds()
+        if duration is None or duration <= 0:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        total = math.ceil(duration / EPOCH_WINDOW_SECONDS)
+        current_time = self.time_series_viewer.current_cursor_time()
+        current_epoch = int(current_time // EPOCH_WINDOW_SECONDS)
+        states: list[str] = [""] * total
+        csv_path = self.current_recording.epoch_health_path
+        if csv_path.exists():
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        if (
+                            row.get("subject_id") == self.current_recording.subject_id
+                            and row.get("session_id") == self.current_recording.session_id
+                        ):
+                            idx = self._numeric_value(row.get("epoch_index"))
+                            if idx is not None:
+                                i = int(idx)
+                                if 0 <= i < total:
+                                    states[i] = row.get("health", "")
+            except Exception:
+                pass
+        self.epoch_timeline_widget.set_data(total, states, current_epoch)
+        self.epoch_timeline_widget.setVisible(True)
+
+    def _on_epoch_timeline_clicked(self, epoch_index: int) -> None:
+        self._goto_epoch(epoch_index)
 
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)
