@@ -17,7 +17,7 @@ import numpy as np
 import pyqtgraph as pg
 from mne.io.constants import FIFF
 from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QCursor
+from PyQt5.QtGui import QCursor, QFont
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGraphicsItem,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -179,6 +180,9 @@ class TimeSeriesViewer(QWidget):
         self._annotation_render_range: Optional[tuple[float, float]] = None
         self._annotation_sample_scatter: Optional[pg.ScatterPlotItem] = None
         self._annotation_min_marker: Optional[pg.ScatterPlotItem] = None
+        self._dense_time_ticks_enabled = False
+        self._dense_time_tick_font = QFont()
+        self._dense_time_tick_font.setPixelSize(8)
 
         self._controls_container = QWidget(self)
         control_layout = QVBoxLayout()
@@ -308,11 +312,15 @@ class TimeSeriesViewer(QWidget):
         self._plot_scroll_area = QScrollArea()
         self._plot_scroll_area.setWidgetResizable(True)
         self._plot_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Prevent arrow keys from scrolling the hidden horizontal scrollbar.
+        # Navigation is handled by the parent viewers' shortcuts instead.
+        self._plot_scroll_area.setFocusPolicy(Qt.NoFocus)
         self._plot_scroll_area.setWidget(self._plot_container)
 
         annotation_controls = QWidget()
-        annotation_layout = QHBoxLayout()
+        annotation_layout = QVBoxLayout()
         annotation_layout.setContentsMargins(0, 0, 0, 0)
+        annotation_layout.setSpacing(4)
 
         left_controls = QWidget()
         left_layout = QHBoxLayout()
@@ -331,6 +339,8 @@ class TimeSeriesViewer(QWidget):
         self.revert_all_auto_repair_button = QPushButton("Revert all auto_repair")
         self.revert_all_auto_repair_button.clicked.connect(self.revert_all_auto_repair)
         left_layout.addWidget(self.revert_all_auto_repair_button)
+        left_layout.addWidget(self._build_annotation_nudge_group())
+        left_layout.addStretch()
         left_controls.setLayout(left_layout)
 
         center_controls = QWidget()
@@ -349,26 +359,27 @@ class TimeSeriesViewer(QWidget):
         center_layout.addWidget(self.annotation_count_label)
         center_controls.setLayout(center_layout)
 
-        right_controls = QWidget()
-        right_layout = QHBoxLayout()
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addStretch()
-        right_layout.addWidget(self._build_annotation_nudge_group())
-        right_layout.addWidget(
-            QLabel(
-                "Shortcuts: [ or B = back, ] or N = next (EAR min), "
-                "Space = auto_repair, R = auto_repair_eog, E = auto_repair_ear, "
-                "Shift+←/→ = nudge annotation, Ctrl+C = create from EAR"
-            )
+        shortcuts_label = QLabel(
+            "Shortcuts: [ or B = back, ] or N = next (EAR min), "
+            "Space = auto_repair, R = auto_repair_eog, E = auto_repair_ear, "
+            "Shift+Left/Right = nudge annotation, Ctrl+C = create from EAR"
         )
-        right_controls.setLayout(right_layout)
+        shortcuts_label.setWordWrap(True)
 
-        annotation_layout.addWidget(left_controls, 1)
-        annotation_layout.addWidget(center_controls, 0)
-        annotation_layout.addWidget(right_controls, 1)
+        top_annotation_row = QWidget()
+        top_annotation_layout = QHBoxLayout()
+        top_annotation_layout.setContentsMargins(0, 0, 0, 0)
+        top_annotation_layout.setSpacing(6)
+        top_annotation_layout.addWidget(left_controls, 1)
+        top_annotation_layout.addWidget(center_controls, 0)
+        top_annotation_row.setLayout(top_annotation_layout)
+
+        annotation_layout.addWidget(top_annotation_row)
+        annotation_layout.addWidget(shortcuts_label)
         annotation_controls.setLayout(annotation_layout)
 
         self.status_label = QLabel("Load a video to view synchronized time series data.")
+        self.status_label.setWordWrap(True)
 
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -424,6 +435,12 @@ class TimeSeriesViewer(QWidget):
         if self._times is None or self._times.size == 0:
             return None
         return float(self._times[-1])
+
+    def set_dense_time_ticks(self, enabled: bool) -> None:
+        """Force consistent bottom-axis tick spacing for narrow fixed windows."""
+
+        self._dense_time_ticks_enabled = enabled
+        self._update_time_axis_tick_spacing()
 
     def seek_time(self, seconds: float) -> None:
         """Move the time-series view to the requested time in seconds."""
@@ -558,11 +575,11 @@ class TimeSeriesViewer(QWidget):
         )
         QApplication.processEvents()
         self._populate_channel_list()
-        self.status_label.setText(f"[3/4] Rendering plot…")
+        self.status_label.setText("[3/4] Rendering plot…")
         QApplication.processEvents()
         self._plot_data()
         self._ensure_view_range(0.0)
-        self.status_label.setText(f"[4/4] Loading annotations…")
+        self.status_label.setText("[4/4] Loading annotations…")
         QApplication.processEvents()
         self._add_annotations_for_path(csv_path)
         self._ensure_view_range(0.0)
@@ -860,9 +877,21 @@ class TimeSeriesViewer(QWidget):
         widget.showGrid(x=True, y=True, alpha=0.3)
         widget.setLabel("bottom", "Time", units="s")
         widget.setLabel("left", "Channels")
-        widget.getPlotItem().getAxis("left").setWidth(60)
+        plot_item = widget.getPlotItem()
+        plot_item.getAxis("left").setWidth(60)
+        bottom_axis = plot_item.getAxis("bottom")
+        bottom_axis.enableAutoSIPrefix(False)
+        self._apply_time_axis_tick_spacing(bottom_axis, widget)
         widget.viewport().installEventFilter(self)
-        widget.setFocusPolicy(Qt.StrongFocus)
+        # Disable keyboard focus on both the widget and the ViewBox scene-item so
+        # pyqtgraph's built-in arrow-key panning (translateBy ±0.1) never fires.
+        # That handler runs every time the ViewBox holds scene focus, which happens
+        # after any click on the plot — conflicting with the app's own navigation
+        # shortcuts and progressively shifting the visible window.
+        # Wheel zoom and all mouse interactions go through the event filter above
+        # and require neither widget nor scene keyboard focus.
+        widget.setFocusPolicy(Qt.NoFocus)
+        widget.getPlotItem().getViewBox().setFlag(QGraphicsItem.ItemIsFocusable, False)
 
     def _ear_gain_label_text(self) -> str:
         status = "on" if self._ear_gain_enabled else "off"
@@ -1241,6 +1270,7 @@ class TimeSeriesViewer(QWidget):
         self._refresh_visible_annotation_regions(x_min, x_max)
         self._update_lane_scales(x_min, x_max)
         self._update_annotation_count_label()
+        self._update_time_axis_tick_spacing()
 
     def _max_span_seconds(self) -> float:
         if self._times is None or self._times.size == 0:
@@ -1763,7 +1793,10 @@ class TimeSeriesViewer(QWidget):
         if result is None:
             return
         self._apply_auto_repair_result(
-            self._selected_annotation, result, channel_name=EAR_AVG_CHANNEL, mode_label="auto_repair_ear"
+            self._selected_annotation,
+            result,
+            channel_name=EAR_AVG_CHANNEL,
+            mode_label="auto_repair_ear",
         )
 
     def auto_repair_selected_annotation_eog_with_peak(self, nth_peak: int) -> None:
@@ -1776,7 +1809,10 @@ class TimeSeriesViewer(QWidget):
         if result is None:
             return
         self._apply_auto_repair_result(
-            self._selected_annotation, result, channel_name=EOG_REPAIR_CHANNEL, mode_label="auto_repair_eog"
+            self._selected_annotation,
+            result,
+            channel_name=EOG_REPAIR_CHANNEL,
+            mode_label="auto_repair_eog",
         )
 
     def _auto_repair_annotation_ear(self, annotation: Annotation) -> None:
@@ -1823,7 +1859,7 @@ class TimeSeriesViewer(QWidget):
         )
         if repaired is None:
             self.status_label.setText(
-                f"No finite minimum found in the annotation window for auto_repair_ear."
+                "No finite minimum found in the annotation window for auto_repair_ear."
             )
             return None
 
@@ -2258,7 +2294,8 @@ class TimeSeriesViewer(QWidget):
 
         A turning point is only accepted once we are at least min_separation samples
         from the peak, preventing noise wiggles 2–3 samples from the peak from being
-        mistaken for the blink boundary. Returns the last index if fewer than nth_trough troughs found.
+        mistaken for the blink boundary. Returns the last index if fewer than
+        `nth_trough` troughs are found.
         """
         count = 0
         i = peak_idx
@@ -3143,7 +3180,7 @@ class TimeSeriesViewer(QWidget):
         self._reset_annotation_drag()
 
     def _finalize_annotation_drag_blink(self, pos) -> None:
-        """Finalize a left-button drag as a 'blink' annotation without a dialog; negligible drags are ignored."""
+        """Finalize a left-button drag as a blink annotation without a dialog."""
         if self._annotation_drag_start is None or self._times is None:
             self._reset_annotation_drag()
             return
@@ -3509,6 +3546,51 @@ class TimeSeriesViewer(QWidget):
         self._lane_curves.setdefault(widget, [])
         self._lane_cursor_lines[widget] = cursor_line
         self._annotation_items_by_widget.setdefault(widget, [])
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_time_axis_tick_spacing()
+
+    def _update_time_axis_tick_spacing(self) -> None:
+        for widget in self._lane_widgets:
+            axis = widget.getPlotItem().getAxis("bottom")
+            self._apply_time_axis_tick_spacing(axis, widget)
+
+    def _apply_time_axis_tick_spacing(
+        self, axis: pg.AxisItem, widget: pg.PlotWidget
+    ) -> None:
+        if not self._dense_time_ticks_enabled:
+            axis.setTicks(None)
+            axis.setTickSpacing()
+            axis.setStyle(
+                hideOverlappingLabels=True,
+                textFillLimits=[(0, 0.8), (2, 0.6), (4, 0.4), (6, 0.2)],
+                tickFont=None,
+                tickTextHeight=18,
+            )
+            return
+
+        view_range = widget.getPlotItem().getViewBox().viewRange()[0]
+        x_min, x_max = view_range
+        start_second = int(math.ceil(x_min))
+        end_second = int(math.floor(x_max))
+        major_ticks = []
+        minor_ticks = []
+        for second in range(start_second, end_second + 1):
+            tick = (float(second), str(second))
+            if second % 5 == 0:
+                major_ticks.append(tick)
+            else:
+                minor_ticks.append(tick)
+
+        axis.setStyle(
+            hideOverlappingLabels=False,
+            textFillLimits=[(0, 100.0)],
+            tickFont=self._dense_time_tick_font,
+            tickTextHeight=24,
+        )
+        axis.setTickSpacing()
+        axis.setTicks([major_ticks, minor_ticks])
 
     def _ensure_lane_count(self, lane_count: int) -> None:
         lane_count = max(1, lane_count)

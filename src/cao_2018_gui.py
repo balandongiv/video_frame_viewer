@@ -17,7 +17,6 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -29,7 +28,6 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QShortcut,
     QSizePolicy,
-    QSplitter,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -73,7 +71,11 @@ class CaoTimeSeriesViewer(TimeSeriesViewer):
             return
         from time_series import Annotation
         self._annotations = [
-            Annotation(onset=float(r["onset"]), duration=float(r["duration"]), description=r["description"])
+            Annotation(
+                onset=float(r["onset"]),
+                duration=float(r["duration"]),
+                description=r["description"],
+            )
             for r in rows
         ]
         self._update_annotation_filter_options()
@@ -135,16 +137,35 @@ def ensure_cao_session_file(folder: Path) -> Path:
     return session_path
 
 
+# 5-level epoch quality scale: level -> (label, background, text-colour)
+_EPOCH_LEVELS: dict[str, tuple[str, str, str]] = {
+    "1": ("Very Bad",  "#ffcdd2", "#b71c1c"),
+    "2": ("Bad",       "#ffe0b2", "#e65100"),
+    "3": ("Fair",      "#fff9c4", "#f57f17"),
+    "4": ("Good",      "#dcedc8", "#33691e"),
+    "5": ("Very Good", "#c8e6c9", "#1b5e20"),
+}
+
+
 class EpochTimelineWidget(QWidget):
     """Horizontal mini-timeline showing 30-second epoch health states.
 
-    Each epoch is drawn as a coloured block: green (Good), red (Bad), or grey (unlabelled).
-    The current epoch receives a dark border.  Click any block to jump to that epoch.
+    Each epoch block is coloured by quality level (1=red … 5=green) or grey when
+    unlabelled.  The current epoch receives a dark border.  Click any block to jump.
     """
 
     epoch_clicked = pyqtSignal(int)
 
-    _FILL = {"Good": "#4caf50", "Bad": "#f44336", "": "#bdbdbd"}
+    _FILL = {
+        "1": "#f44336",
+        "2": "#ff7043",
+        "3": "#ffa726",
+        "4": "#9ccc65",
+        "5": "#4caf50",
+        "Good": "#4caf50",  # backward compat
+        "Bad":  "#f44336",  # backward compat
+        "":     "#bdbdbd",
+    }
     _BORDER = "#212121"
 
     def __init__(self, parent=None) -> None:
@@ -209,9 +230,6 @@ class Cao2018Viewer(QMainWindow):
     """Standalone FIF review UI for the Cao 2018 sustained-attention driving dataset."""
 
     DEFAULT_STEP_SECONDS = 20.0
-    RECORDINGS_PANEL_WIDTH = 300
-    RECORDINGS_PANEL_MAX_WIDTH = 340
-    DETACHED_PANEL_MAX_WIDTH = 16777215
 
     def __init__(self, dataset_root: Path = DEFAULT_CAO_ROOT) -> None:
         super().__init__()
@@ -242,12 +260,22 @@ class Cao2018Viewer(QMainWindow):
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
-        self._build_directory_controls(main_layout)
+        self.main_tabs = self._build_main_tabs()
+        main_layout.addWidget(self.main_tabs)
 
-        self.main_splitter = QSplitter(Qt.Horizontal)
-        self.main_splitter.setChildrenCollapsible(False)
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
 
-        self.side_tabs = self._build_side_tabs()
+    def _build_recordings_tab(self) -> QWidget:
+        recordings_tab = QWidget()
+        recordings_layout = QVBoxLayout()
+        recordings_layout.setContentsMargins(8, 8, 8, 8)
+        recordings_layout.setSpacing(8)
+        recordings_tab.setLayout(recordings_layout)
+
+        recordings_layout.addWidget(self._build_directory_controls())
+        recordings_layout.addWidget(self._build_recording_list_panel())
+
         self.time_series_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.epoch_health_label = QLabel("")
@@ -270,25 +298,11 @@ class Cao2018Viewer(QMainWindow):
         ts_layout.setStretch(2, 1)
         ts_container.setLayout(ts_layout)
 
-        self.main_splitter.addWidget(self.side_tabs)
-        self.main_splitter.addWidget(ts_container)
-        self.main_splitter.setStretchFactor(0, 0)
-        self.main_splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(self.main_splitter)
+        recordings_layout.addWidget(ts_container, 1)
+        recordings_layout.addWidget(self._build_review_controls())
+        return recordings_tab
 
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-        QTimer.singleShot(0, self._apply_side_tab_mode)
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self._apply_side_tab_mode()
-
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        QTimer.singleShot(0, self._apply_side_tab_mode)
-
-    def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
+    def _build_directory_controls(self) -> QGroupBox:
         directory_group = QGroupBox("Cao 2018 Dataset Directory")
         directory_layout = QHBoxLayout()
         directory_group.setLayout(directory_layout)
@@ -306,20 +320,10 @@ class Cao2018Viewer(QMainWindow):
         directory_layout.addWidget(self.directory_input)
         directory_layout.addWidget(browse_button)
         directory_layout.addWidget(scan_button)
-        parent_layout.addWidget(directory_group)
+        return directory_group
 
-    def _build_side_tabs(self) -> QTabWidget:
+    def _build_main_tabs(self) -> QTabWidget:
         tabs = QTabWidget()
-
-        recordings_tab = QWidget()
-        recordings_layout = QVBoxLayout()
-        recordings_layout.setContentsMargins(0, 0, 0, 0)
-        recordings_layout.setSpacing(6)
-        recordings_layout.addWidget(self._build_recording_list_panel())
-        recordings_layout.addWidget(self._build_review_controls())
-        recordings_layout.setStretch(0, 1)
-        recordings_layout.setStretch(1, 0)
-        recordings_tab.setLayout(recordings_layout)
 
         channels_tab = QWidget()
         channels_layout = QVBoxLayout()
@@ -332,41 +336,32 @@ class Cao2018Viewer(QMainWindow):
         summary_tab = self._build_summary_tab()
         statistics_tab = self._build_statistics_tab()
 
-        tabs.addTab(recordings_tab, "Recordings")
+        tabs.addTab(self._build_recordings_tab(), "Recordings")
         tabs.addTab(channels_tab, "Channels")
         tabs.addTab(summary_tab, "Summary")
         tabs.addTab(statistics_tab, "Statistics")
-        tabs.currentChanged.connect(self._apply_side_tab_mode)
         return tabs
-
-    def _apply_side_tab_mode(self, *_: object) -> None:
-        if self.side_tabs.currentIndex() == 0:
-            self.time_series_viewer.show()
-            self.side_tabs.setMaximumWidth(self.RECORDINGS_PANEL_MAX_WIDTH)
-            available_width = max(1, self.main_splitter.width())
-            side_width = min(self.RECORDINGS_PANEL_WIDTH, max(220, available_width // 4))
-            self.main_splitter.setSizes([side_width, max(1, available_width - side_width)])
-            return
-
-        self.side_tabs.setMaximumWidth(self.DETACHED_PANEL_MAX_WIDTH)
-        self.time_series_viewer.hide()
-        self.main_splitter.setSizes([max(1, self.main_splitter.width()), 0])
 
     def _build_recording_list_panel(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         container.setLayout(layout)
 
-        layout.addWidget(QLabel("Discovered FIF Recordings"))
+        layout.addWidget(QLabel("Discovered FIF Sessions"))
         self.recording_list = QListWidget()
+        self.recording_list.setMaximumHeight(160)
         self.recording_list.itemSelectionChanged.connect(self._load_selected_recording)
         layout.addWidget(self.recording_list)
         return container
 
     def _build_review_controls(self) -> QGroupBox:
         control_group = QGroupBox("Review Controls")
-        layout = QGridLayout()
-        control_group.setLayout(layout)
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(6, 6, 6, 6)
+        outer_layout.setSpacing(6)
+        control_group.setLayout(outer_layout)
 
         self.time_input = QLineEdit()
         self.time_input.setPlaceholderText("Time in seconds")
@@ -408,26 +403,40 @@ class Cao2018Viewer(QMainWindow):
         self.save_annotations_button.clicked.connect(self.time_series_viewer.save_annotations)
 
         self.current_time_label = QLabel("Current time: -")
+        self.current_time_label.setWordWrap(True)
 
         self.window_dropdown = QComboBox()
         self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s", "40 s", "50 s", "60 s"])
         self.window_dropdown.currentIndexChanged.connect(self._on_window_changed)
 
-        layout.addWidget(QLabel("Time (s):"), 0, 0)
-        layout.addWidget(self.time_input, 0, 1)
-        layout.addWidget(self.time_search_button, 0, 2)
-        layout.addWidget(QLabel("Step (s):"), 1, 0)
-        layout.addLayout(step_layout, 1, 1, 1, 2)
-        layout.addWidget(QLabel("Window:"), 2, 0)
-        layout.addWidget(self.window_dropdown, 2, 1, 1, 2)
-        layout.addWidget(self.left_button, 3, 0)
-        layout.addWidget(self.right_button, 3, 1)
-        layout.addWidget(self.save_annotations_button, 3, 2)
-        layout.addWidget(QLabel("Status:"), 4, 0)
-        layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
-        layout.addWidget(self.current_time_label, 5, 0, 1, 3)
+        self.epoch_health_mode_button = QPushButton("Epoch Health Mode")
+        self.epoch_health_mode_button.setCheckable(True)
+        self.epoch_health_mode_button.setToolTip(
+            "Lock step and window to 30 s and show the epoch health timeline"
+        )
+        self.epoch_health_mode_button.toggled.connect(self._toggle_epoch_health_mode)
 
-        play_layout = QHBoxLayout()
+        first_row = QHBoxLayout()
+        first_row.setContentsMargins(0, 0, 0, 0)
+        first_row.setSpacing(6)
+        first_row.addWidget(self.epoch_health_mode_button)
+        first_row.addWidget(QLabel("Status:"))
+        first_row.addWidget(self.status_dropdown)
+        first_row.addWidget(QLabel("Time (s):"))
+        first_row.addWidget(self.time_input)
+        first_row.addWidget(self.time_search_button)
+        first_row.addWidget(QLabel("Step (s):"))
+        first_row.addLayout(step_layout)
+        first_row.addWidget(QLabel("Window:"))
+        first_row.addWidget(self.window_dropdown)
+
+        second_row = QHBoxLayout()
+        second_row.setContentsMargins(0, 0, 0, 0)
+        second_row.setSpacing(6)
+        second_row.addWidget(self.left_button)
+        second_row.addWidget(self.right_button)
+        second_row.addWidget(self.save_annotations_button)
+
         self.play_button = QPushButton("Play Annotations")
         self.play_button.setCheckable(True)
         self.play_button.clicked.connect(self._toggle_annotation_play)
@@ -437,12 +446,10 @@ class Cao2018Viewer(QMainWindow):
         self.play_speed_spinbox.setSingleStep(0.1)
         self.play_speed_spinbox.setSuffix(" s")
         self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
-        play_layout.addWidget(self.play_button)
-        play_layout.addWidget(QLabel("Speed:"))
-        play_layout.addWidget(self.play_speed_spinbox)
-        layout.addLayout(play_layout, 6, 0, 1, 3)
+        second_row.addWidget(self.play_button)
+        second_row.addWidget(QLabel("Speed:"))
+        second_row.addWidget(self.play_speed_spinbox)
 
-        forward_play_layout = QHBoxLayout()
         self.forward_play_button = QPushButton("Forward Play")
         self.forward_play_button.setCheckable(True)
         self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
@@ -451,19 +458,17 @@ class Cao2018Viewer(QMainWindow):
         self.forward_play_speed_spinbox.setValue(0.1)
         self.forward_play_speed_spinbox.setSingleStep(0.1)
         self.forward_play_speed_spinbox.setSuffix(" s")
-        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F or Q to toggle)")
-        forward_play_layout.addWidget(self.forward_play_button)
-        forward_play_layout.addWidget(QLabel("Speed:"))
-        forward_play_layout.addWidget(self.forward_play_speed_spinbox)
-        layout.addLayout(forward_play_layout, 7, 0, 1, 3)
-
-        self.epoch_health_mode_button = QPushButton("Epoch Health Mode")
-        self.epoch_health_mode_button.setCheckable(True)
-        self.epoch_health_mode_button.setToolTip(
-            "Lock step and window to 30 s and show the epoch health timeline"
+        self.forward_play_speed_spinbox.setToolTip(
+            "Seconds between each forward step (F or Q to toggle)"
         )
-        self.epoch_health_mode_button.toggled.connect(self._toggle_epoch_health_mode)
-        layout.addWidget(self.epoch_health_mode_button, 8, 0, 1, 3)
+        second_row.addWidget(self.forward_play_button)
+        second_row.addWidget(QLabel("Speed:"))
+        second_row.addWidget(self.forward_play_speed_spinbox)
+        second_row.addStretch()
+
+        outer_layout.addLayout(first_row)
+        outer_layout.addLayout(second_row)
+        outer_layout.addWidget(self.current_time_label)
 
         return control_group
 
@@ -656,11 +661,7 @@ class Cao2018Viewer(QMainWindow):
 
         self.recordings = self._discover_recordings(dataset_root)
         for recording in self.recordings:
-            csv_state = "CSV" if recording.csv_path.exists() else "No CSV"
-            blinker_state = "Blinker" if recording.blinker_path.exists() else "No Blinker"
-            item = QListWidgetItem(
-                f"{recording.display_name} | {recording.ts_path.name} | {csv_state} | {blinker_state}"
-            )
+            item = QListWidgetItem(self._recording_list_text(recording))
             item.setData(Qt.UserRole, recording)
             self.recording_list.addItem(item)
 
@@ -1061,7 +1062,11 @@ class Cao2018Viewer(QMainWindow):
             self._format_path_line("CSV", recording.csv_path, loaded_csv is not None)
         )
         self.summary_blinker_label.setText(
-            self._format_path_line("Blinker", recording.blinker_path, recording.blinker_path.exists())
+            self._format_path_line(
+                "Blinker",
+                recording.blinker_path,
+                recording.blinker_path.exists(),
+            )
         )
         self.summary_epoch_health_label.setText(
             self._format_epoch_health_summary(recording)
@@ -1069,19 +1074,22 @@ class Cao2018Viewer(QMainWindow):
 
     def _format_epoch_health_summary(self, recording: "CaoRecording") -> str:
         csv_path = recording.epoch_health_path
-        exists = csv_path.exists()
-        if not exists:
+        if not csv_path.exists():
             return f"Epoch Health: {csv_path} [missing]"
         try:
             with csv_path.open(newline="", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
-            good = sum(1 for r in rows if r.get("health") == "Good")
-            bad = sum(1 for r in rows if r.get("health") == "Bad")
             total = len(rows)
-            return (
-                f"Epoch Health: {csv_path} [found, {total} epoch(s): "
-                f"{good} Good, {bad} Bad]"
+            counts: dict[str, int] = {}
+            for r in rows:
+                h = r.get("health", "")
+                counts[h] = counts.get(h, 0) + 1
+            level_summary = ", ".join(
+                f"{h}: {counts[h]}"
+                for h in sorted(counts.keys(), key=lambda x: (x not in _EPOCH_LEVELS, x))
+                if counts[h] > 0
             )
+            return f"Epoch Health: {csv_path} [found, {total} epoch(s): {level_summary}]"
         except Exception:
             return f"Epoch Health: {csv_path} [found, unreadable]"
 
@@ -1091,6 +1099,9 @@ class Cao2018Viewer(QMainWindow):
         base = f"{label}: {path} [{state}, {exists}]"
         return f"{base} [{extra}]" if extra else base
 
+    def _recording_list_text(self, recording: CaoRecording) -> str:
+        return recording.display_name
+
     def _refresh_current_list_item(self) -> None:
         selected_items = self.recording_list.selectedItems()
         if not selected_items:
@@ -1098,11 +1109,7 @@ class Cao2018Viewer(QMainWindow):
         recording = selected_items[0].data(Qt.UserRole)
         if not isinstance(recording, CaoRecording):
             return
-        csv_state = "CSV" if recording.csv_path.exists() else "No CSV"
-        blinker_state = "Blinker" if recording.blinker_path.exists() else "No Blinker"
-        selected_items[0].setText(
-            f"{recording.display_name} | {recording.ts_path.name} | {csv_state} | {blinker_state}"
-        )
+        selected_items[0].setText(self._recording_list_text(recording))
 
     def _refresh_dataset_summary(self) -> None:
         totals = {
@@ -1407,13 +1414,25 @@ class Cao2018Viewer(QMainWindow):
         self.stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.stop_shortcut.activated.connect(self._stop_all_play)
 
+        # Keys 1–5 set epoch quality level (1=worst, 5=best)
+        _level_keys = [Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5]
+        self._epoch_level_shortcuts = []
+        for _key, _lvl in zip(_level_keys, ["1", "2", "3", "4", "5"]):
+            _sc = QShortcut(QKeySequence(_key), self)
+            _sc.setContext(Qt.WidgetWithChildrenShortcut)
+            _sc.activated.connect(
+                (lambda lvl: lambda: self._log_epoch_health_if_allowed(lvl))(_lvl)
+            )
+            self._epoch_level_shortcuts.append(_sc)
+
+        # J = level 5 (best), K = level 1 (worst) — kept for ergonomic familiarity
         self.epoch_good_shortcut = QShortcut(QKeySequence(Qt.Key_J), self)
         self.epoch_good_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        self.epoch_good_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("Good"))
+        self.epoch_good_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("5"))
 
         self.epoch_bad_shortcut = QShortcut(QKeySequence(Qt.Key_K), self)
         self.epoch_bad_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        self.epoch_bad_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("Bad"))
+        self.epoch_bad_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("1"))
 
         self.time_series_viewer.annotation_jump_requested.connect(self._on_annotation_jump)
 
@@ -1427,7 +1446,7 @@ class Cao2018Viewer(QMainWindow):
 
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()
-        return not isinstance(focus_widget, (QLineEdit, QDoubleSpinBox, QTextEdit))
+        return not isinstance(focus_widget, (QLineEdit, QDoubleSpinBox, QTextEdit, QComboBox))
 
     def _on_annotation_jump(self, seconds: float) -> None:
         self._update_current_time_label()
@@ -1446,26 +1465,29 @@ class Cao2018Viewer(QMainWindow):
         epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
 
         health = self._read_epoch_health(self.current_recording, epoch_index)
-        if health == "Good":
+        level_info = _EPOCH_LEVELS.get(health)
+        prefix = f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)"
+        if level_info:
+            label_text, bg_color, text_color = level_info
             self.epoch_health_label.setStyleSheet(
-                "background-color: #c8e6c9; color: #1b5e20; font-weight: bold; font-size: 13px;"
+                "background-color: "
+                f"{bg_color}; color: {text_color}; "
+                "font-weight: bold; font-size: 13px;"
             )
-            self.epoch_health_label.setText(
-                f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)  ✓ Good"
-            )
-        elif health == "Bad":
+            self.epoch_health_label.setText(f"{prefix}  [{health}] {label_text}")
+        elif health in ("Good", "Bad"):  # backward compat with old binary labels
+            bg = "#c8e6c9" if health == "Good" else "#ffcdd2"
+            fg = "#1b5e20" if health == "Good" else "#b71c1c"
             self.epoch_health_label.setStyleSheet(
-                "background-color: #ffcdd2; color: #b71c1c; font-weight: bold; font-size: 13px;"
+                f"background-color: {bg}; color: {fg}; font-weight: bold; font-size: 13px;"
             )
-            self.epoch_health_label.setText(
-                f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)  ✗ Bad"
-            )
+            self.epoch_health_label.setText(f"{prefix}  {health} (legacy)")
         else:
             self.epoch_health_label.setStyleSheet(
                 "background-color: #f5f5f5; color: #616161; font-size: 13px;"
             )
             self.epoch_health_label.setText(
-                f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)  — unlabelled  [J = Good, K = Bad]"
+                f"{prefix}  — unlabelled  [1=Very Bad … 5=Very Good]"
             )
         self._update_epoch_timeline()
 
@@ -1531,9 +1553,23 @@ class Cao2018Viewer(QMainWindow):
                 "timestamp": timestamp,
             })
 
-        rows.sort(key=lambda r: (r.get("subject_id", ""), r.get("session_id", ""), int(r.get("epoch_index", 0))))
+        rows.sort(
+            key=lambda r: (
+                r.get("subject_id", ""),
+                r.get("session_id", ""),
+                int(r.get("epoch_index", 0)),
+            )
+        )
 
-        fieldnames = ["subject_id", "session_id", "epoch_index", "epoch_start_s", "epoch_end_s", "health", "timestamp"]
+        fieldnames = [
+            "subject_id",
+            "session_id",
+            "epoch_index",
+            "epoch_start_s",
+            "epoch_end_s",
+            "health",
+            "timestamp",
+        ]
         try:
             with csv_path.open("w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1554,6 +1590,7 @@ class Cao2018Viewer(QMainWindow):
 
     def _toggle_epoch_health_mode(self, checked: bool) -> None:
         self._epoch_health_mode = checked
+        self.time_series_viewer.set_dense_time_ticks(checked)
         if checked:
             self._pre_mode_step = self.step_seconds_input.value()
             self._pre_mode_window_index = self.window_dropdown.currentIndex()

@@ -224,7 +224,10 @@ class VideoFrameViewer(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._apply_upper_splitter_ratio)
+        # Do NOT re-apply the splitter ratio here.  The stretch factors (1:4) already
+        # maintain proportions on window resize, and calling setSizes on every resize
+        # event (including those triggered internally by pyqtgraph relayouts) would
+        # reset any user-adjusted panel widths.
 
     def _apply_upper_splitter_ratio(self) -> None:
         total_width = self.upper_splitter.width()
