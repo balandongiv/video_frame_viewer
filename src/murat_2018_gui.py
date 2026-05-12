@@ -12,14 +12,13 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import yaml
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QKeySequence, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -28,9 +27,9 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QShortcut,
     QSizePolicy,
-    QSplitter,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -56,6 +55,23 @@ DEFAULT_SESSION_STATE = {
     "remark": "",
     "remarks": [],
 }
+EPOCH_HEALTH_FILENAME = "epoch_health.csv"
+EPOCH_WINDOW_SECONDS = 30.0
+_STATUSES = ["Pending", "Ongoing", "Complete", "Issue"]
+_STATUS_COLORS = {
+    "Pending": "#9e9e9e",
+    "Ongoing": "#1976d2",
+    "Complete": "#388e3c",
+    "Issue": "#d32f2f",
+}
+
+_EPOCH_LEVELS: dict[str, tuple[str, str, str]] = {
+    "1": ("Very Bad",  "#ffcdd2", "#b71c1c"),
+    "2": ("Bad",       "#ffe0b2", "#e65100"),
+    "3": ("Fair",      "#fff9c4", "#f57f17"),
+    "4": ("Good",      "#dcedc8", "#33691e"),
+    "5": ("Very Good", "#c8e6c9", "#1b5e20"),
+}
 
 
 @dataclass(frozen=True)
@@ -71,7 +87,6 @@ class MuratRecording:
         """Always points to the original .edf, used for CSV path derivation."""
         if self.ts_path.suffix == ".edf":
             return self.ts_path
-        # ts_path is a .fif — the matching .edf shares the subject folder name
         edf_candidates = sorted(self.folder.glob("*.edf"))
         return edf_candidates[0] if edf_candidates else self.ts_path.with_suffix(".edf")
 
@@ -88,13 +103,16 @@ class MuratRecording:
         return self.folder / BLINKER_PICKLE
 
     @property
+    def epoch_health_path(self) -> Path:
+        return self.folder / EPOCH_HEALTH_FILENAME
+
+    @property
     def session_path(self) -> Path:
         return self.folder / SESSION_FILENAME
 
 
 def ensure_murat_session_file(folder: Path) -> Path:
     """Create the Murat review session YAML in a recording folder if missing."""
-
     session_path = folder / SESSION_FILENAME
     if not session_path.exists():
         with session_path.open("w", encoding="utf-8") as handle:
@@ -102,13 +120,85 @@ def ensure_murat_session_file(folder: Path) -> Path:
     return session_path
 
 
+class EpochTimelineWidget(QWidget):
+    """Horizontal mini-timeline showing 30-second epoch health states."""
+
+    epoch_clicked = pyqtSignal(int)
+
+    _FILL = {
+        "1": "#f44336",
+        "2": "#ff7043",
+        "3": "#ffa726",
+        "4": "#9ccc65",
+        "5": "#4caf50",
+        "Good": "#4caf50",
+        "Bad":  "#f44336",
+        "":     "#bdbdbd",
+    }
+    _BORDER = "#212121"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._total = 0
+        self._states: list[str] = []
+        self._current = 0
+        self.setFixedHeight(36)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_data(self, total: int, states: list[str], current: int) -> None:
+        self._total = total
+        self._states = list(states)
+        self._current = current
+        self.update()
+
+    def _block_rect(self, i: int) -> tuple[int, int, int, int]:
+        w = self.width()
+        x = int(i * w / self._total)
+        x2 = int((i + 1) * w / self._total)
+        return x, 2, max(1, x2 - x - 1), self.height() - 4
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        if self._total == 0:
+            painter.end()
+            return
+        for i in range(self._total):
+            state = self._states[i] if i < len(self._states) else ""
+            x, y, rw, rh = self._block_rect(i)
+            painter.fillRect(x, y, rw, rh, QColor(self._FILL.get(state, self._FILL[""])))
+            if rw >= 18:
+                painter.setPen(QColor("#ffffff") if state else QColor("#616161"))
+                f = painter.font()
+                f.setPixelSize(9)
+                painter.setFont(f)
+                painter.drawText(x, y, rw, rh, Qt.AlignCenter, str(i))
+            if i == self._current:
+                painter.setPen(QPen(QColor(self._BORDER), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(x + 1, y + 1, max(0, rw - 2), max(0, rh - 2))
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self._total == 0 or event.button() != Qt.LeftButton:
+            return
+        i = max(0, min(self._total - 1, int(event.x() / max(1, self.width()) * self._total)))
+        self.epoch_clicked.emit(i)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._total == 0:
+            self.setToolTip("")
+            return
+        i = max(0, min(self._total - 1, int(event.x() / max(1, self.width()) * self._total)))
+        state = self._states[i] if i < len(self._states) else ""
+        s0, s1 = i * EPOCH_WINDOW_SECONDS, (i + 1) * EPOCH_WINDOW_SECONDS
+        self.setToolTip(f"Epoch {i}  ({s0:.0f}s – {s1:.0f}s)  [{state or 'unlabelled'}]")
+
+
 class Murat2018Viewer(QMainWindow):
     """Standalone EDF review UI for the Murat 2018 dataset."""
 
     DEFAULT_STEP_SECONDS = 1.0
-    RECORDINGS_PANEL_WIDTH = 280
-    RECORDINGS_PANEL_MAX_WIDTH = 320
-    DETACHED_PANEL_MAX_WIDTH = 16777215
 
     def __init__(self, dataset_root: Path = DEFAULT_MURAT_ROOT) -> None:
         super().__init__()
@@ -117,6 +207,7 @@ class Murat2018Viewer(QMainWindow):
         self.recordings: list[MuratRecording] = []
         self.current_recording: Optional[MuratRecording] = None
         self.status_value = "Pending"
+        self._epoch_health_mode = False
 
         self.time_series_viewer = TimeSeriesViewer()
 
@@ -138,33 +229,69 @@ class Murat2018Viewer(QMainWindow):
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
-        self._build_directory_controls(main_layout)
-
-        self.main_splitter = QSplitter(Qt.Horizontal)
-        self.main_splitter.setChildrenCollapsible(False)
-
-        self.side_tabs = self._build_side_tabs()
-        self.time_series_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        self.main_splitter.addWidget(self.side_tabs)
-        self.main_splitter.addWidget(self.time_series_viewer)
-        self.main_splitter.setStretchFactor(0, 0)
-        self.main_splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(self.main_splitter)
+        self.main_tabs = self._build_main_tabs()
+        main_layout.addWidget(self.main_tabs)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        QTimer.singleShot(0, self._apply_side_tab_mode)
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self._apply_side_tab_mode()
+    def _build_main_tabs(self) -> QTabWidget:
+        tabs = QTabWidget()
 
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        QTimer.singleShot(0, self._apply_side_tab_mode)
+        channels_tab = QWidget()
+        channels_layout = QVBoxLayout()
+        channels_layout.setContentsMargins(0, 0, 0, 0)
+        channels_layout.setSpacing(6)
+        channels_layout.addWidget(self.time_series_viewer.channel_controls())
+        channels_layout.addStretch()
+        channels_tab.setLayout(channels_layout)
 
-    def _build_directory_controls(self, parent_layout: QVBoxLayout) -> None:
+        summary_tab = self._build_summary_tab()
+        statistics_tab = self._build_statistics_tab()
+
+        tabs.addTab(self._build_recordings_tab(), "Recordings")
+        tabs.addTab(channels_tab, "Channels")
+        tabs.addTab(summary_tab, "Summary")
+        tabs.addTab(statistics_tab, "Statistics")
+        return tabs
+
+    def _build_recordings_tab(self) -> QWidget:
+        recordings_tab = QWidget()
+        recordings_layout = QVBoxLayout()
+        recordings_layout.setContentsMargins(8, 8, 8, 8)
+        recordings_layout.setSpacing(8)
+        recordings_tab.setLayout(recordings_layout)
+
+        recordings_layout.addWidget(self._build_directory_controls())
+        recordings_layout.addWidget(self._build_recording_list_panel())
+
+        self.time_series_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.epoch_health_label = QLabel("")
+        self.epoch_health_label.setAlignment(Qt.AlignCenter)
+        self.epoch_health_label.setFixedHeight(24)
+
+        self.epoch_timeline_widget = EpochTimelineWidget()
+        self.epoch_timeline_widget.epoch_clicked.connect(self._on_epoch_timeline_clicked)
+        self.epoch_timeline_widget.setVisible(False)
+
+        ts_container = QWidget()
+        ts_layout = QVBoxLayout()
+        ts_layout.setContentsMargins(0, 0, 0, 0)
+        ts_layout.setSpacing(0)
+        ts_layout.addWidget(self.epoch_health_label)
+        ts_layout.addWidget(self.epoch_timeline_widget)
+        ts_layout.addWidget(self.time_series_viewer)
+        ts_layout.setStretch(0, 0)
+        ts_layout.setStretch(1, 0)
+        ts_layout.setStretch(2, 1)
+        ts_container.setLayout(ts_layout)
+
+        recordings_layout.addWidget(ts_container, 1)
+        recordings_layout.addWidget(self._build_review_controls())
+        return recordings_tab
+
+    def _build_directory_controls(self) -> QGroupBox:
         directory_group = QGroupBox("Murat 2018 Dataset Directory")
         directory_layout = QHBoxLayout()
         directory_group.setLayout(directory_layout)
@@ -182,65 +309,28 @@ class Murat2018Viewer(QMainWindow):
         directory_layout.addWidget(self.directory_input)
         directory_layout.addWidget(browse_button)
         directory_layout.addWidget(scan_button)
-        parent_layout.addWidget(directory_group)
-
-    def _build_side_tabs(self) -> QTabWidget:
-        tabs = QTabWidget()
-
-        recordings_tab = QWidget()
-        recordings_layout = QVBoxLayout()
-        recordings_layout.setContentsMargins(0, 0, 0, 0)
-        recordings_layout.setSpacing(6)
-        recordings_layout.addWidget(self._build_recording_list_panel())
-        recordings_layout.addWidget(self._build_review_controls())
-        recordings_layout.setStretch(0, 1)
-        recordings_layout.setStretch(1, 0)
-        recordings_tab.setLayout(recordings_layout)
-
-        channels_tab = QWidget()
-        channels_layout = QVBoxLayout()
-        channels_layout.setContentsMargins(0, 0, 0, 0)
-        channels_layout.setSpacing(6)
-        channels_layout.addWidget(self.time_series_viewer.channel_controls())
-        channels_layout.addStretch()
-        channels_tab.setLayout(channels_layout)
-
-        summary_tab = self._build_summary_tab()
-
-        tabs.addTab(recordings_tab, "Recordings")
-        tabs.addTab(channels_tab, "Channels")
-        tabs.addTab(summary_tab, "Summary")
-        tabs.currentChanged.connect(self._apply_side_tab_mode)
-        return tabs
-
-    def _apply_side_tab_mode(self, *_: object) -> None:
-        if self.side_tabs.currentIndex() == 0:
-            self.time_series_viewer.show()
-            self.side_tabs.setMaximumWidth(self.RECORDINGS_PANEL_MAX_WIDTH)
-            available_width = max(1, self.main_splitter.width())
-            side_width = min(self.RECORDINGS_PANEL_WIDTH, max(220, available_width // 4))
-            self.main_splitter.setSizes([side_width, max(1, available_width - side_width)])
-            return
-
-        self.side_tabs.setMaximumWidth(self.DETACHED_PANEL_MAX_WIDTH)
-        self.time_series_viewer.hide()
-        self.main_splitter.setSizes([max(1, self.main_splitter.width()), 0])
+        return directory_group
 
     def _build_recording_list_panel(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         container.setLayout(layout)
 
         layout.addWidget(QLabel("Discovered EDF Recordings"))
         self.recording_list = QListWidget()
+        self.recording_list.setMaximumHeight(160)
         self.recording_list.itemSelectionChanged.connect(self._load_selected_recording)
         layout.addWidget(self.recording_list)
         return container
 
     def _build_review_controls(self) -> QGroupBox:
         control_group = QGroupBox("Review Controls")
-        layout = QGridLayout()
-        control_group.setLayout(layout)
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(6, 6, 6, 6)
+        outer_layout.setSpacing(6)
+        control_group.setLayout(outer_layout)
 
         self.time_input = QLineEdit()
         self.time_input.setPlaceholderText("Time in seconds")
@@ -282,26 +372,40 @@ class Murat2018Viewer(QMainWindow):
         self.save_annotations_button.clicked.connect(self.time_series_viewer.save_annotations)
 
         self.current_time_label = QLabel("Current time: -")
+        self.current_time_label.setWordWrap(True)
 
         self.window_dropdown = QComboBox()
-        self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s"])
+        self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s", "40 s", "50 s", "60 s"])
         self.window_dropdown.currentIndexChanged.connect(self._on_window_changed)
 
-        layout.addWidget(QLabel("Time (s):"), 0, 0)
-        layout.addWidget(self.time_input, 0, 1)
-        layout.addWidget(self.time_search_button, 0, 2)
-        layout.addWidget(QLabel("Step (s):"), 1, 0)
-        layout.addLayout(step_layout, 1, 1, 1, 2)
-        layout.addWidget(QLabel("Window:"), 2, 0)
-        layout.addWidget(self.window_dropdown, 2, 1, 1, 2)
-        layout.addWidget(self.left_button, 3, 0)
-        layout.addWidget(self.right_button, 3, 1)
-        layout.addWidget(self.save_annotations_button, 3, 2)
-        layout.addWidget(QLabel("Status:"), 4, 0)
-        layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
-        layout.addWidget(self.current_time_label, 5, 0, 1, 3)
+        self.epoch_health_mode_button = QPushButton("Epoch Health Mode")
+        self.epoch_health_mode_button.setCheckable(True)
+        self.epoch_health_mode_button.setToolTip(
+            "Lock step and window to 30 s and show the epoch health timeline"
+        )
+        self.epoch_health_mode_button.toggled.connect(self._toggle_epoch_health_mode)
 
-        play_layout = QHBoxLayout()
+        first_row = QHBoxLayout()
+        first_row.setContentsMargins(0, 0, 0, 0)
+        first_row.setSpacing(6)
+        first_row.addWidget(self.epoch_health_mode_button)
+        first_row.addWidget(QLabel("Status:"))
+        first_row.addWidget(self.status_dropdown)
+        first_row.addWidget(QLabel("Time (s):"))
+        first_row.addWidget(self.time_input)
+        first_row.addWidget(self.time_search_button)
+        first_row.addWidget(QLabel("Step (s):"))
+        first_row.addLayout(step_layout)
+        first_row.addWidget(QLabel("Window:"))
+        first_row.addWidget(self.window_dropdown)
+
+        second_row = QHBoxLayout()
+        second_row.setContentsMargins(0, 0, 0, 0)
+        second_row.setSpacing(6)
+        second_row.addWidget(self.left_button)
+        second_row.addWidget(self.right_button)
+        second_row.addWidget(self.save_annotations_button)
+
         self.play_button = QPushButton("Play Annotations")
         self.play_button.setCheckable(True)
         self.play_button.clicked.connect(self._toggle_annotation_play)
@@ -311,12 +415,10 @@ class Murat2018Viewer(QMainWindow):
         self.play_speed_spinbox.setSingleStep(0.1)
         self.play_speed_spinbox.setSuffix(" s")
         self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
-        play_layout.addWidget(self.play_button)
-        play_layout.addWidget(QLabel("Speed:"))
-        play_layout.addWidget(self.play_speed_spinbox)
-        layout.addLayout(play_layout, 6, 0, 1, 3)
+        second_row.addWidget(self.play_button)
+        second_row.addWidget(QLabel("Speed:"))
+        second_row.addWidget(self.play_speed_spinbox)
 
-        forward_play_layout = QHBoxLayout()
         self.forward_play_button = QPushButton("Forward Play")
         self.forward_play_button.setCheckable(True)
         self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
@@ -325,11 +427,17 @@ class Murat2018Viewer(QMainWindow):
         self.forward_play_speed_spinbox.setValue(0.1)
         self.forward_play_speed_spinbox.setSingleStep(0.1)
         self.forward_play_speed_spinbox.setSuffix(" s")
-        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F or Q to toggle)")
-        forward_play_layout.addWidget(self.forward_play_button)
-        forward_play_layout.addWidget(QLabel("Speed:"))
-        forward_play_layout.addWidget(self.forward_play_speed_spinbox)
-        layout.addLayout(forward_play_layout, 7, 0, 1, 3)
+        self.forward_play_speed_spinbox.setToolTip(
+            "Seconds between each forward step (F or Q to toggle)"
+        )
+        second_row.addWidget(self.forward_play_button)
+        second_row.addWidget(QLabel("Speed:"))
+        second_row.addWidget(self.forward_play_speed_spinbox)
+        second_row.addStretch()
+
+        outer_layout.addLayout(first_row)
+        outer_layout.addLayout(second_row)
+        outer_layout.addWidget(self.current_time_label)
 
         return control_group
 
@@ -342,7 +450,13 @@ class Murat2018Viewer(QMainWindow):
         self.summary_edf_label = QLabel("EDF: (none selected)")
         self.summary_csv_label = QLabel("CSV: (not loaded)")
         self.summary_blinker_label = QLabel("Blinker: (not loaded)")
-        for label in (self.summary_edf_label, self.summary_csv_label, self.summary_blinker_label):
+        self.summary_epoch_health_label = QLabel("Epoch Health: (none selected)")
+        for label in (
+            self.summary_edf_label,
+            self.summary_csv_label,
+            self.summary_blinker_label,
+            self.summary_epoch_health_label,
+        ):
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setWordWrap(True)
 
@@ -382,12 +496,109 @@ class Murat2018Viewer(QMainWindow):
         layout.addWidget(self.summary_edf_label)
         layout.addWidget(self.summary_csv_label)
         layout.addWidget(self.summary_blinker_label)
+        layout.addWidget(self.summary_epoch_health_label)
         layout.addWidget(self.summary_overall_label)
         layout.addWidget(self.summary_table)
         layout.addWidget(remark_group)
         layout.addStretch()
         summary_tab.setLayout(layout)
         return summary_tab
+
+    def _build_statistics_tab(self) -> QWidget:
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        tab = QWidget()
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
+
+        refresh_btn = QPushButton("Refresh Statistics")
+        refresh_btn.clicked.connect(self._refresh_statistics_tab)
+        outer_layout.addWidget(refresh_btn)
+
+        self._stats_overall_fig = Figure(figsize=(6, 3.5), tight_layout=True)
+        self._stats_overall_canvas = FigureCanvasQTAgg(self._stats_overall_fig)
+        self._stats_overall_canvas.setMinimumHeight(260)
+
+        self._stats_subject_fig = Figure(figsize=(6, 4), tight_layout=True)
+        self._stats_subject_canvas = FigureCanvasQTAgg(self._stats_subject_fig)
+        self._stats_subject_canvas.setMinimumHeight(320)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner_layout = QVBoxLayout()
+        inner_layout.setContentsMargins(4, 4, 4, 4)
+        inner_layout.setSpacing(4)
+        inner_layout.addWidget(QLabel("Overall Status Distribution"))
+        inner_layout.addWidget(self._stats_overall_canvas)
+        inner_layout.addWidget(QLabel("Status by Subject"))
+        inner_layout.addWidget(self._stats_subject_canvas)
+        inner_layout.addStretch()
+        inner.setLayout(inner_layout)
+        scroll.setWidget(inner)
+
+        outer_layout.addWidget(scroll)
+        tab.setLayout(outer_layout)
+        return tab
+
+    def _refresh_statistics_tab(self) -> None:
+        if not hasattr(self, "_stats_overall_fig"):
+            return
+        status_counts: dict[str, int] = {s: 0 for s in _STATUSES}
+        subject_counts: dict[str, dict[str, int]] = {}
+        for recording in self.recordings:
+            status = self._status_for_recording(recording)
+            status_counts[status] = status_counts.get(status, 0) + 1
+            subj = recording.subject_id
+            if subj not in subject_counts:
+                subject_counts[subj] = {s: 0 for s in _STATUSES}
+            subject_counts[subj][status] += 1
+        self._draw_overall_pie(status_counts)
+        self._draw_subject_bars(subject_counts)
+
+    def _draw_overall_pie(self, status_counts: dict[str, int]) -> None:
+        fig = self._stats_overall_fig
+        fig.clear()
+        ax = fig.add_subplot(111)
+        total = sum(status_counts.values())
+        labels = [s for s in _STATUSES if status_counts.get(s, 0) > 0]
+        sizes = [status_counts[s] for s in labels]
+        colors = [_STATUS_COLORS[s] for s in labels]
+        if total == 0:
+            ax.text(0.5, 0.5, "No recordings", ha="center", va="center", transform=ax.transAxes)
+        else:
+            def _fmt(pct: float) -> str:
+                n = int(round(pct * total / 100))
+                return f"{pct:.0f}%\n({n})"
+            ax.pie(sizes, labels=labels, colors=colors, autopct=_fmt, startangle=90)
+        ax.set_title(f"Overall Status  (n={total})")
+        fig.tight_layout()
+        self._stats_overall_canvas.draw()
+
+    def _draw_subject_bars(self, subject_counts: dict[str, dict[str, int]]) -> None:
+        fig = self._stats_subject_fig
+        fig.clear()
+        if not subject_counts:
+            self._stats_subject_canvas.draw()
+            return
+        subjects = sorted(subject_counts.keys(), key=lambda x: self._subject_sort_key(x))
+        n = len(subjects)
+        canvas_height = max(320, n * 28 + 80)
+        self._stats_subject_canvas.setMinimumHeight(canvas_height)
+        ax = fig.add_subplot(111)
+        bottoms = [0.0] * n
+        for status in _STATUSES:
+            vals = [float(subject_counts[s].get(status, 0)) for s in subjects]
+            if any(v > 0 for v in vals):
+                ax.barh(subjects, vals, left=bottoms, label=status, color=_STATUS_COLORS[status])
+                bottoms = [b + v for b, v in zip(bottoms, vals)]
+        ax.set_xlabel("Sessions")
+        ax.set_title("Status by Subject")
+        ax.legend(loc="lower right", fontsize=8)
+        fig.tight_layout()
+        self._stats_subject_canvas.draw()
 
     def _browse_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
@@ -410,6 +621,7 @@ class Murat2018Viewer(QMainWindow):
         self.time_series_viewer.load_time_series_file(None)
         self._update_review_controls(False)
         self._update_selected_summary(None)
+        self._update_epoch_health_label()
 
         if not dataset_root.exists():
             self._set_status(f"Murat 2018 dataset root not found at {dataset_root}.")
@@ -418,11 +630,7 @@ class Murat2018Viewer(QMainWindow):
 
         self.recordings = self._discover_recordings(dataset_root)
         for recording in self.recordings:
-            csv_state = "CSV" if recording.csv_path.exists() else "No CSV"
-            blinker_state = "Blinker" if recording.blinker_path.exists() else "No Blinker"
-            item = QListWidgetItem(
-                f"{recording.subject_id} | {recording.ts_path.name} | {csv_state} | {blinker_state}"
-            )
+            item = QListWidgetItem(recording.subject_id)
             item.setData(Qt.UserRole, recording)
             self.recording_list.addItem(item)
 
@@ -483,6 +691,7 @@ class Murat2018Viewer(QMainWindow):
         self._refresh_current_list_item()
         self._load_session_state()
         self._refresh_dataset_summary()
+        self._update_epoch_health_label()
 
         if created:
             self._set_status(message)
@@ -677,8 +886,23 @@ class Murat2018Viewer(QMainWindow):
         if self.current_recording is None:
             self._set_status("Load a recording before navigating.")
             return
-        step = self.step_seconds_input.value() * (1 if direction > 0 else -1)
-        self._goto_time(self.time_series_viewer.current_cursor_time() + step)
+        if self._epoch_health_mode:
+            current_epoch = int(
+                self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+            )
+            target_epoch = max(0, current_epoch + (1 if direction > 0 else -1))
+            self._goto_epoch(target_epoch)
+        else:
+            step = self.step_seconds_input.value() * (1 if direction > 0 else -1)
+            self._goto_time(self.time_series_viewer.current_cursor_time() + step)
+
+    def _goto_epoch(self, epoch_index: int) -> None:
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        viewer = self.time_series_viewer
+        viewer.view_span_seconds = EPOCH_WINDOW_SECONDS
+        viewer.default_view_span_seconds = EPOCH_WINDOW_SECONDS
+        self._goto_time(epoch_start + EPOCH_WINDOW_SECONDS / 2)
+        QApplication.processEvents()
 
     def _goto_time(self, seconds: float) -> None:
         if self.current_recording is None:
@@ -686,6 +910,7 @@ class Murat2018Viewer(QMainWindow):
             return
         self.time_series_viewer.seek_time(max(0.0, seconds))
         self._update_current_time_label()
+        self._update_epoch_health_label()
         self._set_status(f"Displaying time {self.time_series_viewer.current_cursor_time():.3f}s.")
 
     def _update_current_time_label(self) -> None:
@@ -728,6 +953,11 @@ class Murat2018Viewer(QMainWindow):
             widget.setEnabled(enabled)
         if not enabled:
             self.current_time_label.setText("Current time: -")
+        elif self._epoch_health_mode:
+            self.step_seconds_input.setEnabled(False)
+            self.step_dec_button.setEnabled(False)
+            self.step_inc_button.setEnabled(False)
+            self.window_dropdown.setEnabled(False)
 
     def _update_selected_summary(
         self,
@@ -739,6 +969,7 @@ class Murat2018Viewer(QMainWindow):
             self.summary_edf_label.setText("EDF: (none selected)")
             self.summary_csv_label.setText("CSV: (not loaded)")
             self.summary_blinker_label.setText("Blinker: (not loaded)")
+            self.summary_epoch_health_label.setText("Epoch Health: (none selected)")
             return
 
         ds_tag = (
@@ -756,6 +987,30 @@ class Murat2018Viewer(QMainWindow):
         self.summary_blinker_label.setText(
             self._format_path_line("Blinker", recording.blinker_path, recording.blinker_path.exists())
         )
+        self.summary_epoch_health_label.setText(
+            self._format_epoch_health_summary(recording)
+        )
+
+    def _format_epoch_health_summary(self, recording: MuratRecording) -> str:
+        csv_path = recording.epoch_health_path
+        if not csv_path.exists():
+            return f"Epoch Health: {csv_path} [missing]"
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            total = len(rows)
+            counts: dict[str, int] = {}
+            for r in rows:
+                h = r.get("health", "")
+                counts[h] = counts.get(h, 0) + 1
+            level_summary = ", ".join(
+                f"{h}: {counts[h]}"
+                for h in sorted(counts.keys(), key=lambda x: (x not in _EPOCH_LEVELS, x))
+                if counts[h] > 0
+            )
+            return f"Epoch Health: {csv_path} [found, {total} epoch(s): {level_summary}]"
+        except Exception:
+            return f"Epoch Health: {csv_path} [found, unreadable]"
 
     def _format_path_line(self, label: str, path: Path, loaded: bool, extra: str = "") -> str:
         exists = "found" if path.exists() else "missing"
@@ -770,11 +1025,7 @@ class Murat2018Viewer(QMainWindow):
         recording = selected_items[0].data(Qt.UserRole)
         if not isinstance(recording, MuratRecording):
             return
-        csv_state = "CSV" if recording.csv_path.exists() else "No CSV"
-        blinker_state = "Blinker" if recording.blinker_path.exists() else "No Blinker"
-        selected_items[0].setText(
-            f"{recording.subject_id} | {recording.ts_path.name} | {csv_state} | {blinker_state}"
-        )
+        selected_items[0].setText(recording.subject_id)
 
     def _refresh_dataset_summary(self) -> None:
         totals = {
@@ -803,6 +1054,7 @@ class Murat2018Viewer(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.summary_table.setItem(row, col, item)
+        self._refresh_statistics_tab()
 
     def _status_for_recording(self, recording: MuratRecording) -> str:
         if not recording.session_path.exists():
@@ -891,7 +1143,7 @@ class Murat2018Viewer(QMainWindow):
         )
 
     def _on_window_changed(self, index: int) -> None:
-        spans = [5.0, 10.0, 15.0, 30.0]
+        spans = [5.0, 10.0, 15.0, 30.0, 40.0, 50.0, 60.0]
         span = spans[index]
         viewer = self.time_series_viewer
         viewer.view_span_seconds = span
@@ -1058,6 +1310,10 @@ class Murat2018Viewer(QMainWindow):
         self.delete_annotation_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.delete_annotation_shortcut.activated.connect(self._delete_annotation_if_allowed)
 
+        self.delete_annotation_shortcut_slash = QShortcut(QKeySequence(Qt.Key_Slash), self)
+        self.delete_annotation_shortcut_slash.setContext(Qt.WidgetWithChildrenShortcut)
+        self.delete_annotation_shortcut_slash.activated.connect(self._delete_annotation_if_allowed)
+
         self.play_shortcut = QShortcut(QKeySequence(Qt.Key_P), self)
         self.play_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.play_shortcut.activated.connect(self._start_annotation_play)
@@ -1074,6 +1330,24 @@ class Murat2018Viewer(QMainWindow):
         self.stop_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.stop_shortcut.activated.connect(self._stop_all_play)
 
+        _level_keys = [Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5]
+        self._epoch_level_shortcuts = []
+        for _key, _lvl in zip(_level_keys, ["1", "2", "3", "4", "5"]):
+            _sc = QShortcut(QKeySequence(_key), self)
+            _sc.setContext(Qt.WidgetWithChildrenShortcut)
+            _sc.activated.connect(
+                (lambda lvl: lambda: self._log_epoch_health_if_allowed(lvl))(_lvl)
+            )
+            self._epoch_level_shortcuts.append(_sc)
+
+        self.epoch_good_shortcut = QShortcut(QKeySequence(Qt.Key_J), self)
+        self.epoch_good_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.epoch_good_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("5"))
+
+        self.epoch_bad_shortcut = QShortcut(QKeySequence(Qt.Key_K), self)
+        self.epoch_bad_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.epoch_bad_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("1"))
+
         self.time_series_viewer.annotation_jump_requested.connect(self._on_annotation_jump)
 
     def _step_if_allowed(self, direction: int) -> None:
@@ -1086,11 +1360,207 @@ class Murat2018Viewer(QMainWindow):
 
     def _shortcut_allowed(self) -> bool:
         focus_widget = QApplication.focusWidget()
-        return not isinstance(focus_widget, (QLineEdit, QDoubleSpinBox, QTextEdit))
+        return not isinstance(focus_widget, (QLineEdit, QDoubleSpinBox, QTextEdit, QComboBox))
 
     def _on_annotation_jump(self, seconds: float) -> None:
         self._update_current_time_label()
         self._set_status(f"Jumped to annotation at {seconds:.3f}s.")
+
+    def _update_epoch_health_label(self) -> None:
+        if self.current_recording is None:
+            self.epoch_health_label.setText("")
+            self.epoch_health_label.setStyleSheet("")
+            self._update_epoch_timeline()
+            return
+
+        current_time = self.time_series_viewer.current_cursor_time()
+        epoch_index = int(current_time // EPOCH_WINDOW_SECONDS)
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
+
+        health = self._read_epoch_health(self.current_recording, epoch_index)
+        level_info = _EPOCH_LEVELS.get(health)
+        prefix = f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)"
+        if level_info:
+            label_text, bg_color, text_color = level_info
+            self.epoch_health_label.setStyleSheet(
+                f"background-color: {bg_color}; color: {text_color}; "
+                "font-weight: bold; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(f"{prefix}  [{health}] {label_text}")
+        elif health in ("Good", "Bad"):
+            bg = "#c8e6c9" if health == "Good" else "#ffcdd2"
+            fg = "#1b5e20" if health == "Good" else "#b71c1c"
+            self.epoch_health_label.setStyleSheet(
+                f"background-color: {bg}; color: {fg}; font-weight: bold; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(f"{prefix}  {health} (legacy)")
+        else:
+            self.epoch_health_label.setStyleSheet(
+                "background-color: #f5f5f5; color: #616161; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(
+                f"{prefix}  — unlabelled  [1=Very Bad … 5=Very Good]"
+            )
+        self._update_epoch_timeline()
+
+    def _read_epoch_health(self, recording: MuratRecording, epoch_index: int) -> str:
+        csv_path = recording.epoch_health_path
+        if not csv_path.exists():
+            return ""
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if (row.get("subject_id") == recording.subject_id
+                            and row.get("epoch_index") == str(epoch_index)):
+                        return row.get("health", "")
+        except Exception:
+            pass
+        return ""
+
+    def _log_epoch_health_if_allowed(self, health: str) -> None:
+        if self._shortcut_allowed():
+            self._log_epoch_health(health)
+
+    def _log_epoch_health(self, health: str) -> None:
+        if self.current_recording is None:
+            self._set_status("Load a recording before logging epoch health.")
+            return
+
+        current_time = self.time_series_viewer.current_cursor_time()
+        epoch_index = int(current_time // EPOCH_WINDOW_SECONDS)
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
+
+        recording = self.current_recording
+        csv_path = recording.epoch_health_path
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        rows: list[dict] = []
+        if csv_path.exists():
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as f:
+                    rows = list(csv.DictReader(f))
+            except Exception:
+                rows = []
+
+        updated = False
+        for row in rows:
+            if (row.get("subject_id") == recording.subject_id
+                    and row.get("epoch_index") == str(epoch_index)):
+                row["health"] = health
+                row["timestamp"] = timestamp
+                updated = True
+                break
+
+        if not updated:
+            rows.append({
+                "subject_id": recording.subject_id,
+                "epoch_index": str(epoch_index),
+                "epoch_start_s": f"{epoch_start:.3f}",
+                "epoch_end_s": f"{epoch_end:.3f}",
+                "health": health,
+                "timestamp": timestamp,
+            })
+
+        rows.sort(
+            key=lambda r: (
+                r.get("subject_id", ""),
+                int(r.get("epoch_index", 0)),
+            )
+        )
+
+        fieldnames = [
+            "subject_id",
+            "epoch_index",
+            "epoch_start_s",
+            "epoch_end_s",
+            "health",
+            "timestamp",
+        ]
+        try:
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as exc:
+            self._set_status(f"Failed to save epoch health: {exc}")
+            return
+
+        self._update_epoch_health_label()
+        if self.current_recording is not None:
+            self.summary_epoch_health_label.setText(
+                self._format_epoch_health_summary(self.current_recording)
+            )
+        self._set_status(
+            f"Epoch {epoch_index} ({epoch_start:.0f}s–{epoch_end:.0f}s) marked as {health}."
+        )
+
+    def _toggle_epoch_health_mode(self, checked: bool) -> None:
+        self._epoch_health_mode = checked
+        self.time_series_viewer.set_dense_time_ticks(checked)
+        if checked:
+            self._pre_mode_step = self.step_seconds_input.value()
+            self._pre_mode_window_index = self.window_dropdown.currentIndex()
+            self.step_seconds_input.setValue(EPOCH_WINDOW_SECONDS)
+            self.window_dropdown.setCurrentIndex(3)  # 30 s
+            self.time_series_viewer.view_span_seconds = EPOCH_WINDOW_SECONDS
+            self.time_series_viewer.default_view_span_seconds = EPOCH_WINDOW_SECONDS
+            self.step_seconds_input.setEnabled(False)
+            self.step_dec_button.setEnabled(False)
+            self.step_inc_button.setEnabled(False)
+            self.window_dropdown.setEnabled(False)
+            self.epoch_health_mode_button.setText("Exit Epoch Mode")
+            current_epoch = int(
+                self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+            )
+            self._goto_epoch(current_epoch)
+            self._set_status("Epoch Health Mode active — step and window locked to 30 s.")
+        else:
+            self.step_seconds_input.setValue(
+                getattr(self, "_pre_mode_step", self.DEFAULT_STEP_SECONDS)
+            )
+            self.window_dropdown.setCurrentIndex(
+                getattr(self, "_pre_mode_window_index", 0)
+            )
+            self.step_seconds_input.setEnabled(True)
+            self.step_dec_button.setEnabled(True)
+            self.step_inc_button.setEnabled(True)
+            self.window_dropdown.setEnabled(True)
+            self.epoch_health_mode_button.setText("Epoch Health Mode")
+            self._set_status("Epoch Health Mode disabled.")
+        self._update_epoch_timeline()
+
+    def _update_epoch_timeline(self) -> None:
+        if not self._epoch_health_mode or self.current_recording is None:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        duration = self.time_series_viewer.signal_duration_seconds()
+        if duration is None or duration <= 0:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        total = math.ceil(duration / EPOCH_WINDOW_SECONDS)
+        current_time = self.time_series_viewer.current_cursor_time()
+        current_epoch = int(current_time // EPOCH_WINDOW_SECONDS)
+        states: list[str] = [""] * total
+        csv_path = self.current_recording.epoch_health_path
+        if csv_path.exists():
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        if row.get("subject_id") == self.current_recording.subject_id:
+                            idx = self._numeric_value(row.get("epoch_index"))
+                            if idx is not None:
+                                i = int(idx)
+                                if 0 <= i < total:
+                                    states[i] = row.get("health", "")
+            except Exception:
+                pass
+        self.epoch_timeline_widget.set_data(total, states, current_epoch)
+        self.epoch_timeline_widget.setVisible(True)
+
+    def _on_epoch_timeline_clicked(self, epoch_index: int) -> None:
+        self._goto_epoch(epoch_index)
 
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)
