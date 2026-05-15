@@ -1,11 +1,13 @@
 """PyQt5 GUI for the video frame viewer application."""
+import csv
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 import yaml
-from PyQt5.QtCore import QEvent, QPoint, QSize, Qt, QTimer
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QKeySequence, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -52,6 +54,101 @@ from utils import (
 from video_handler import VideoHandler
 
 SESSION_FILENAME = "VideoFrameViewers.yaml"
+EPOCH_HEALTH_FILENAME = "epoch_health.csv"
+EPOCH_WINDOW_SECONDS = 30.0
+
+_GUI_STATUSES = ["Pending", "daphne_check", "Ongoing", "Complete", "complete_eeg", "Issue"]
+_GUI_STATUS_COLORS = {
+    "Pending": "#9e9e9e",
+    "daphne_check": "#ff7043",
+    "Ongoing": "#1976d2",
+    "Complete": "#388e3c",
+    "complete_eeg": "#7b1fa2",
+    "Issue": "#d32f2f",
+}
+
+_EPOCH_LEVELS: dict[str, tuple[str, str, str]] = {
+    "1": ("Very Bad",  "#ffcdd2", "#b71c1c"),
+    "2": ("Bad",       "#ffe0b2", "#e65100"),
+    "3": ("Fair",      "#fff9c4", "#f57f17"),
+    "4": ("Good",      "#dcedc8", "#33691e"),
+    "5": ("Very Good", "#c8e6c9", "#1b5e20"),
+}
+
+
+class EpochTimelineWidget(QWidget):
+    """Horizontal mini-timeline showing 30-second epoch health states."""
+
+    epoch_clicked = pyqtSignal(int)
+
+    _FILL = {
+        "1": "#f44336",
+        "2": "#ff7043",
+        "3": "#ffa726",
+        "4": "#9ccc65",
+        "5": "#4caf50",
+        "Good": "#4caf50",
+        "Bad":  "#f44336",
+        "":     "#bdbdbd",
+    }
+    _BORDER = "#212121"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._total = 0
+        self._states: list[str] = []
+        self._current = 0
+        self.setFixedHeight(36)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_data(self, total: int, states: list[str], current: int) -> None:
+        self._total = total
+        self._states = list(states)
+        self._current = current
+        self.update()
+
+    def _block_rect(self, i: int) -> tuple[int, int, int, int]:
+        w = self.width()
+        x = int(i * w / self._total)
+        x2 = int((i + 1) * w / self._total)
+        return x, 2, max(1, x2 - x - 1), self.height() - 4
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        if self._total == 0:
+            painter.end()
+            return
+        for i in range(self._total):
+            state = self._states[i] if i < len(self._states) else ""
+            x, y, rw, rh = self._block_rect(i)
+            painter.fillRect(x, y, rw, rh, QColor(self._FILL.get(state, self._FILL[""])))
+            if rw >= 18:
+                painter.setPen(QColor("#ffffff") if state else QColor("#616161"))
+                f = painter.font()
+                f.setPixelSize(9)
+                painter.setFont(f)
+                painter.drawText(x, y, rw, rh, Qt.AlignCenter, str(i))
+            if i == self._current:
+                painter.setPen(QPen(QColor(self._BORDER), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(x + 1, y + 1, max(0, rw - 2), max(0, rh - 2))
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self._total == 0 or event.button() != Qt.LeftButton:
+            return
+        i = max(0, min(self._total - 1, int(event.x() / max(1, self.width()) * self._total)))
+        self.epoch_clicked.emit(i)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._total == 0:
+            self.setToolTip("")
+            return
+        i = max(0, min(self._total - 1, int(event.x() / max(1, self.width()) * self._total)))
+        state = self._states[i] if i < len(self._states) else ""
+        s0, s1 = i * EPOCH_WINDOW_SECONDS, (i + 1) * EPOCH_WINDOW_SECONDS
+        self.setToolTip(f"Epoch {i}  ({s0:.0f}s – {s1:.0f}s)  [{state or 'unlabelled'}]")
 
 
 class PannableLabel(QLabel):
@@ -143,6 +240,8 @@ class VideoFrameViewer(QMainWindow):
 
         self._forward_play_timer = QTimer(self)
         self._forward_play_timer.timeout.connect(self._forward_play_tick)
+
+        self._epoch_health_mode: bool = False
 
         self._e_key_held: bool = False
         self._e_digit_consumed: bool = False
@@ -313,11 +412,29 @@ class VideoFrameViewer(QMainWindow):
     def _build_time_series_panel(self) -> QWidget:
         time_series_group = QGroupBox("Time Series")
         time_series_layout = QVBoxLayout()
+        time_series_layout.setContentsMargins(4, 4, 4, 4)
+        time_series_layout.setSpacing(0)
+
+        self.epoch_health_label = QLabel("")
+        self.epoch_health_label.setAlignment(Qt.AlignCenter)
+        self.epoch_health_label.setFixedHeight(24)
+
+        self.epoch_timeline_widget = EpochTimelineWidget()
+        self.epoch_timeline_widget.epoch_clicked.connect(self._on_epoch_timeline_clicked)
+        self.epoch_timeline_widget.setVisible(False)
+
         self.time_series_viewer.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
         )
         self.time_series_viewer.setMinimumHeight(140)
+
+        time_series_layout.addWidget(self.epoch_health_label)
+        time_series_layout.addWidget(self.epoch_timeline_widget)
         time_series_layout.addWidget(self.time_series_viewer)
+        time_series_layout.setStretch(0, 0)
+        time_series_layout.setStretch(1, 0)
+        time_series_layout.setStretch(2, 1)
+
         time_series_group.setLayout(time_series_layout)
         time_series_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         return time_series_group
@@ -345,12 +462,14 @@ class VideoFrameViewer(QMainWindow):
 
         navigation_tab = self._build_navigation_tab()
         summary_tab = self._build_summary_tab()
+        statistics_tab = self._build_statistics_tab()
         help_tab = self._build_help_tab()
 
         tabs.addTab(videos_tab, "Videos")
         tabs.addTab(channels_tab, "Channels")
         tabs.addTab(navigation_tab, "Navigation")
         tabs.addTab(summary_tab, "Summary")
+        tabs.addTab(statistics_tab, "Statistics")
         tabs.addTab(help_tab, "Help")
 
         return tabs
@@ -581,17 +700,118 @@ class VideoFrameViewer(QMainWindow):
 
     def _build_control_panel(self) -> QGroupBox:
         control_group = QGroupBox("Frame Controls")
-        control_layout = QGridLayout()
-        control_group.setLayout(control_layout)
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(6, 6, 6, 6)
+        outer_layout.setSpacing(4)
+        control_group.setLayout(outer_layout)
+
+        # ── Row 1: epoch health mode button ──────────────────────────────────
+        self.epoch_health_mode_button = QPushButton("Epoch Health Mode")
+        self.epoch_health_mode_button.setCheckable(True)
+        self.epoch_health_mode_button.setToolTip(
+            "Lock window to 30 s and show the epoch health timeline (1–5 to rate)"
+        )
+        self.epoch_health_mode_button.toggled.connect(self._toggle_epoch_health_mode)
+        outer_layout.addWidget(self.epoch_health_mode_button)
+
+        # ── Row 2: status + window ────────────────────────────────────────────
+        status_win_row = QHBoxLayout()
+        status_win_row.setSpacing(4)
+        self.status_dropdown = QComboBox()
+        self.status_dropdown.addItems(
+            ["Pending", "daphne_check", "Ongoing", "Complete", "complete_eeg", "Issue"]
+        )
+        self.status_dropdown.currentTextChanged.connect(self._on_status_changed)
+        self.window_dropdown = QComboBox()
+        self.window_dropdown.addItems(["5 s", "10 s", "15 s", "30 s", "40 s", "50 s", "60 s"])
+        self.window_dropdown.currentIndexChanged.connect(self._on_window_changed)
+        status_win_row.addWidget(QLabel("Status:"))
+        status_win_row.addWidget(self.status_dropdown)
+        status_win_row.addWidget(QLabel("Win:"))
+        status_win_row.addWidget(self.window_dropdown)
+        outer_layout.addLayout(status_win_row)
+
+        # ── Row 3: navigation + save annotations ─────────────────────────────
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(4)
+        self.left_jump_button = QPushButton("◀◀")
+        self.left_jump_button.setToolTip("Jump left (Left)")
+        self.left_jump_button.clicked.connect(self._trigger_left_jump)
+        self.left_button = QPushButton("◀")
+        self.left_button.setToolTip("Step left (Ctrl+Left)")
+        self.left_button.clicked.connect(self._trigger_left_step)
+        self.right_button = QPushButton("▶")
+        self.right_button.setToolTip("Step right (Ctrl+Right)")
+        self.right_button.clicked.connect(self._trigger_right_step)
+        self.right_jump_button = QPushButton("▶▶")
+        self.right_jump_button.setToolTip("Jump right (Right)")
+        self.right_jump_button.clicked.connect(self._trigger_right_jump)
+        self.save_annotations_button = QPushButton("Save Ann.")
+        self.save_annotations_button.setToolTip("Save annotations (Ctrl+S)")
+        self.save_annotations_button.clicked.connect(self.time_series_viewer.save_annotations)
+        nav_row.addWidget(self.left_jump_button)
+        nav_row.addWidget(self.left_button)
+        nav_row.addWidget(self.right_button)
+        nav_row.addWidget(self.right_jump_button)
+        nav_row.addWidget(self.save_annotations_button)
+        outer_layout.addLayout(nav_row)
+
+        # ── Row 4: play annotations ───────────────────────────────────────────
+        play_row = QHBoxLayout()
+        play_row.setSpacing(4)
+        self.play_button = QPushButton("Play Annotations")
+        self.play_button.setCheckable(True)
+        self.play_button.clicked.connect(self._toggle_annotation_play)
+        self.play_speed_spinbox = QDoubleSpinBox()
+        self.play_speed_spinbox.setRange(0.5, 30.0)
+        self.play_speed_spinbox.setValue(2.0)
+        self.play_speed_spinbox.setSingleStep(0.5)
+        self.play_speed_spinbox.setSuffix(" s")
+        self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
+        play_row.addWidget(self.play_button)
+        play_row.addWidget(QLabel("Speed:"))
+        play_row.addWidget(self.play_speed_spinbox)
+        outer_layout.addLayout(play_row)
+
+        # ── Row 5: forward play ───────────────────────────────────────────────
+        fwd_row = QHBoxLayout()
+        fwd_row.setSpacing(4)
+        self.forward_play_button = QPushButton("Forward Play")
+        self.forward_play_button.setCheckable(True)
+        self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
+        self.forward_play_speed_spinbox = QDoubleSpinBox()
+        self.forward_play_speed_spinbox.setRange(0.1, 30.0)
+        self.forward_play_speed_spinbox.setValue(0.5)
+        self.forward_play_speed_spinbox.setSingleStep(0.1)
+        self.forward_play_speed_spinbox.setSuffix(" s")
+        self.forward_play_speed_spinbox.setToolTip(
+            "Seconds between each forward step (F to toggle)"
+        )
+        fwd_row.addWidget(self.forward_play_button)
+        fwd_row.addWidget(QLabel("Speed:"))
+        fwd_row.addWidget(self.forward_play_speed_spinbox)
+        outer_layout.addLayout(fwd_row)
+
+        # ── Current frame/time label ──────────────────────────────────────────
+        self.current_frame_label = QLabel("Current frame: -")
+        self.current_frame_label.setWordWrap(True)
+        outer_layout.addWidget(self.current_frame_label)
+
+        # ── Grid: frame search / shift / sync / csv ───────────────────────────
+        grid_widget = QWidget()
+        grid_layout = QGridLayout()
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(4)
+        grid_widget.setLayout(grid_layout)
 
         self.frame_input = QLineEdit()
-        self.frame_input.setPlaceholderText("Enter frame number (0-based)")
+        self.frame_input.setPlaceholderText("Frame number (0-based)")
         self.frame_input.returnPressed.connect(self._search_frame)
         self.search_button = QPushButton("Search")
         self.search_button.clicked.connect(self._search_frame)
 
         self.time_input = QLineEdit()
-        self.time_input.setPlaceholderText("Enter time in seconds")
+        self.time_input.setPlaceholderText("Time in seconds")
         self.time_input.returnPressed.connect(self._search_time)
         self.time_search_button = QPushButton("Search Time")
         self.time_search_button.clicked.connect(self._search_time)
@@ -603,87 +823,38 @@ class VideoFrameViewer(QMainWindow):
         apply_shift_button.clicked.connect(self._apply_shift)
 
         self.sync_offset_input = QLineEdit()
-        self.sync_offset_input.setPlaceholderText(
-            "Sync offset in seconds (can be negative)"
-        )
+        self.sync_offset_input.setPlaceholderText("Sync offset in seconds")
         self.sync_offset_input.returnPressed.connect(self._apply_sync_offset)
-        apply_sync_offset_button = QPushButton("Apply Sync Offset")
+        apply_sync_offset_button = QPushButton("Apply Sync")
         apply_sync_offset_button.clicked.connect(self._apply_sync_offset)
 
         self.csv_picker_button = QPushButton("Pick CSV")
         self.csv_picker_button.clicked.connect(self._browse_annotation_csv)
 
-        control_layout.addWidget(QLabel("Frame Number:"), 0, 0)
-        control_layout.addWidget(self.frame_input, 0, 1)
-        control_layout.addWidget(self.search_button, 0, 2)
+        grid_layout.addWidget(QLabel("Frame:"), 0, 0)
+        grid_layout.addWidget(self.frame_input, 0, 1)
+        grid_layout.addWidget(self.search_button, 0, 2)
 
-        control_layout.addWidget(QLabel("Time (seconds):"), 1, 0)
-        control_layout.addWidget(self.time_input, 1, 1)
-        control_layout.addWidget(self.time_search_button, 1, 2)
+        grid_layout.addWidget(QLabel("Time (s):"), 1, 0)
+        grid_layout.addWidget(self.time_input, 1, 1)
+        grid_layout.addWidget(self.time_search_button, 1, 2)
 
-        control_layout.addWidget(QLabel("Shift Frame:"), 2, 0)
-        control_layout.addWidget(self.shift_input, 2, 1)
-        control_layout.addWidget(apply_shift_button, 2, 2)
+        grid_layout.addWidget(QLabel("Shift:"), 2, 0)
+        grid_layout.addWidget(self.shift_input, 2, 1)
+        grid_layout.addWidget(apply_shift_button, 2, 2)
 
-        control_layout.addWidget(QLabel("Sync Offset (s):"), 3, 0)
-        control_layout.addWidget(self.sync_offset_input, 3, 1)
-        control_layout.addWidget(apply_sync_offset_button, 3, 2)
+        grid_layout.addWidget(QLabel("Sync (s):"), 3, 0)
+        grid_layout.addWidget(self.sync_offset_input, 3, 1)
+        grid_layout.addWidget(apply_sync_offset_button, 3, 2)
 
-        self.status_dropdown = QComboBox()
-        self.status_dropdown.addItems(
-            ["Pending", "daphne_check", "Ongoing", "Complete", "complete_eeg", "Issue"]
-        )
-        self.status_dropdown.currentTextChanged.connect(self._on_status_changed)
-        control_layout.addWidget(QLabel("Status:"), 4, 0)
-        control_layout.addWidget(self.status_dropdown, 4, 1, 1, 2)
+        grid_layout.addWidget(QLabel("CSV:"), 4, 0)
+        grid_layout.addWidget(self.csv_picker_button, 4, 1, 1, 2)
 
-        control_layout.addWidget(QLabel("Segment CSV:"), 5, 0)
-        control_layout.addWidget(self.csv_picker_button, 5, 1, 1, 2)
+        outer_layout.addWidget(grid_widget)
 
-        play_layout = QHBoxLayout()
-        self.play_button = QPushButton("Play Annotations")
-        self.play_button.setCheckable(True)
-        self.play_button.clicked.connect(self._toggle_annotation_play)
-        self.play_speed_spinbox = QDoubleSpinBox()
-        self.play_speed_spinbox.setRange(0.5, 30.0)
-        self.play_speed_spinbox.setValue(2.0)
-        self.play_speed_spinbox.setSingleStep(0.5)
-        self.play_speed_spinbox.setSuffix(" s")
-        self.play_speed_spinbox.setToolTip("Seconds between each annotation jump")
-        play_layout.addWidget(self.play_button)
-        play_layout.addWidget(QLabel("Speed:"))
-        play_layout.addWidget(self.play_speed_spinbox)
-        control_layout.addLayout(play_layout, 6, 0, 1, 3)
-
-        forward_play_layout = QHBoxLayout()
-        self.forward_play_button = QPushButton("Forward Play")
-        self.forward_play_button.setCheckable(True)
-        self.forward_play_button.clicked.connect(self._toggle_forward_play_button)
-        self.forward_play_speed_spinbox = QDoubleSpinBox()
-        self.forward_play_speed_spinbox.setRange(0.1, 30.0)
-        self.forward_play_speed_spinbox.setValue(0.5)
-        self.forward_play_speed_spinbox.setSingleStep(0.1)
-        self.forward_play_speed_spinbox.setSuffix(" s")
-        self.forward_play_speed_spinbox.setToolTip("Seconds between each forward step (F to toggle)")
-        forward_play_layout.addWidget(self.forward_play_button)
-        forward_play_layout.addWidget(QLabel("Speed:"))
-        forward_play_layout.addWidget(self.forward_play_speed_spinbox)
-        control_layout.addLayout(forward_play_layout, 7, 0, 1, 3)
-
-        navigation_layout = QHBoxLayout()
-        self.left_button = QPushButton("Left")
-        self.right_button = QPushButton("Right")
-        self.left_jump_button = QPushButton("Left_Jump")
-        self.right_jump_button = QPushButton("Right_Jump")
-
-        self.left_button.clicked.connect(self._trigger_left_step)
-        self.right_button.clicked.connect(self._trigger_right_step)
-        self.left_jump_button.clicked.connect(self._trigger_left_jump)
-        self.right_jump_button.clicked.connect(self._trigger_right_jump)
-
-        control_layout.addLayout(navigation_layout, 8, 0, 1, 3)
-
-        zoom_layout = QHBoxLayout()
+        # ── Zoom ──────────────────────────────────────────────────────────────
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(4)
         self.zoom_out_button = QPushButton("Zoom -")
         self.zoom_out_button.clicked.connect(lambda: self._adjust_zoom(-0.25))
         self.zoom_in_button = QPushButton("Zoom +")
@@ -691,16 +862,11 @@ class VideoFrameViewer(QMainWindow):
         self.zoom_reset_button = QPushButton("Reset Zoom")
         self.zoom_reset_button.clicked.connect(self._reset_zoom)
         self.zoom_label = QLabel(self._zoom_label_text())
-
-        zoom_layout.addWidget(self.zoom_out_button)
-        zoom_layout.addWidget(self.zoom_in_button)
-        zoom_layout.addWidget(self.zoom_reset_button)
-        zoom_layout.addWidget(self.zoom_label)
-
-        control_layout.addLayout(zoom_layout, 8, 0, 1, 3)
-
-        self.current_frame_label = QLabel("Current frame: -")
-        control_layout.addWidget(self.current_frame_label, 9, 0, 1, 3)
+        zoom_row.addWidget(self.zoom_out_button)
+        zoom_row.addWidget(self.zoom_in_button)
+        zoom_row.addWidget(self.zoom_reset_button)
+        zoom_row.addWidget(self.zoom_label)
+        outer_layout.addLayout(zoom_row)
 
         return control_group
 
@@ -1227,6 +1393,7 @@ class VideoFrameViewer(QMainWindow):
 
     def _update_time_series_cursor(self) -> None:
         self.time_series_viewer.update_cursor_time(self._synced_time_seconds())
+        self._update_epoch_health_label()
 
     def _jump_to_annotation_time(self, annotation_time: float) -> None:
         if not self.video_handler.capture:
@@ -1239,7 +1406,7 @@ class VideoFrameViewer(QMainWindow):
         self.time_series_viewer.update_cursor_time(annotation_time)
 
     def _update_navigation_state(self, enabled: bool) -> None:
-        for button in [
+        for widget in [
             self.left_button,
             self.right_button,
             self.left_jump_button,
@@ -1247,8 +1414,9 @@ class VideoFrameViewer(QMainWindow):
             self.search_button,
             self.time_search_button,
             self.csv_picker_button,
+            self.save_annotations_button,
         ]:
-            button.setEnabled(enabled)
+            widget.setEnabled(enabled)
         self.remark_input.setEnabled(enabled)
         self.remark_save_button.setEnabled(enabled)
         self.remark_history_label.setEnabled(enabled)
@@ -1407,6 +1575,7 @@ class VideoFrameViewer(QMainWindow):
             f"Missing FIF: {totals['Missing FIF']}"
         )
         self._update_summary_table()
+        self._refresh_statistics_tab()
 
     def _status_for_video(self, video_path: Path) -> str:
         try:
@@ -1575,6 +1744,27 @@ class VideoFrameViewer(QMainWindow):
             self._handle_create_ear_annotation_shortcut
         )
 
+        # Keys 1–5 set epoch quality level (only active in epoch health mode)
+        _level_keys = [Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5]
+        self._epoch_level_shortcuts = []
+        for _key, _lvl in zip(_level_keys, ["1", "2", "3", "4", "5"]):
+            _sc = QShortcut(QKeySequence(_key), self)
+            _sc.setContext(Qt.WidgetWithChildrenShortcut)
+            _sc.activated.connect(
+                (lambda lvl: lambda: self._log_epoch_health_if_allowed(lvl))(_lvl)
+            )
+            self._epoch_level_shortcuts.append(_sc)
+
+        # J = level 5 (Very Good), K = level 1 (Very Bad)
+        epoch_good_shortcut = QShortcut(QKeySequence(Qt.Key_J), self)
+        epoch_good_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        epoch_good_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("5"))
+        epoch_bad_shortcut = QShortcut(QKeySequence(Qt.Key_K), self)
+        epoch_bad_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        epoch_bad_shortcut.activated.connect(lambda: self._log_epoch_health_if_allowed("1"))
+        self.epoch_good_shortcut = epoch_good_shortcut
+        self.epoch_bad_shortcut = epoch_bad_shortcut
+
         self.left_shortcut = left_shortcut
         self.right_shortcut = right_shortcut
         self.left_step_shortcut = left_step_shortcut
@@ -1597,11 +1787,23 @@ class VideoFrameViewer(QMainWindow):
 
     def _handle_left_shortcut(self) -> None:
         if self._shortcut_allowed():
-            self._trigger_left_jump()
+            if self._epoch_health_mode:
+                current_epoch = int(
+                    self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+                )
+                self._goto_epoch(max(0, current_epoch - 1))
+            else:
+                self._trigger_left_jump()
 
     def _handle_right_shortcut(self) -> None:
         if self._shortcut_allowed():
-            self._trigger_right_jump()
+            if self._epoch_health_mode:
+                current_epoch = int(
+                    self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+                )
+                self._goto_epoch(current_epoch + 1)
+            else:
+                self._trigger_right_jump()
 
     def _handle_next_annotation_shortcut(self) -> None:
         if self._shortcut_allowed():
@@ -1777,6 +1979,338 @@ class VideoFrameViewer(QMainWindow):
             return True
 
         return super().eventFilter(obj, event)
+
+    # ── Window / time-series view span ────────────────────────────────────────
+
+    def _on_window_changed(self, index: int) -> None:
+        spans = [5.0, 10.0, 15.0, 30.0, 40.0, 50.0, 60.0]
+        span = spans[index]
+        viewer = self.time_series_viewer
+        viewer.view_span_seconds = span
+        viewer.default_view_span_seconds = span
+        viewer.zoom_label.setText(viewer._zoom_label_text())
+        viewer._ensure_view_range(viewer._last_cursor_time)
+
+    # ── Epoch health mode ─────────────────────────────────────────────────────
+
+    def _toggle_epoch_health_mode(self, checked: bool) -> None:
+        self._epoch_health_mode = checked
+        self.time_series_viewer.set_dense_time_ticks(checked)
+        if checked:
+            self._pre_mode_window_index = self.window_dropdown.currentIndex()
+            self.window_dropdown.setCurrentIndex(3)  # 30 s
+            self.time_series_viewer.view_span_seconds = EPOCH_WINDOW_SECONDS
+            self.time_series_viewer.default_view_span_seconds = EPOCH_WINDOW_SECONDS
+            self.window_dropdown.setEnabled(False)
+            self.epoch_health_mode_button.setText("Exit Epoch Mode")
+            current_epoch = int(
+                self.time_series_viewer.current_cursor_time() // EPOCH_WINDOW_SECONDS
+            )
+            self._goto_epoch(current_epoch)
+            self._set_status("Epoch Health Mode active — window locked to 30 s. Rate with 1–5.")
+        else:
+            self.window_dropdown.setCurrentIndex(
+                getattr(self, "_pre_mode_window_index", 0)
+            )
+            self.window_dropdown.setEnabled(True)
+            self.epoch_health_mode_button.setText("Epoch Health Mode")
+            self._set_status("Epoch Health Mode disabled.")
+        self._update_epoch_timeline()
+
+    def _goto_epoch(self, epoch_index: int) -> None:
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        viewer = self.time_series_viewer
+        viewer.view_span_seconds = EPOCH_WINDOW_SECONDS
+        viewer.default_view_span_seconds = EPOCH_WINDOW_SECONDS
+        center_time = epoch_start + EPOCH_WINDOW_SECONDS / 2
+        viewer.seek_time(center_time)
+        if self.video_handler.capture:
+            target_seconds = max(0.0, center_time - self.sync_offset_seconds)
+            target_frame = seconds_to_frame_index(target_seconds, self.video_handler.fps)
+            self._goto_frame(target_frame, show_status=False)
+        self._update_epoch_health_label()
+        QApplication.processEvents()
+
+    def _update_epoch_health_label(self) -> None:
+        loaded_fif, _ = self.time_series_viewer.last_loaded_paths()
+        if loaded_fif is None:
+            self.epoch_health_label.setText("")
+            self.epoch_health_label.setStyleSheet("")
+            self._update_epoch_timeline()
+            return
+
+        current_time = self.time_series_viewer.current_cursor_time()
+        epoch_index = int(current_time // EPOCH_WINDOW_SECONDS)
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
+
+        health = self._read_epoch_health(loaded_fif, epoch_index)
+        level_info = _EPOCH_LEVELS.get(health)
+        prefix = f"Epoch {epoch_index}  ({epoch_start:.0f}s – {epoch_end:.0f}s)"
+        if level_info:
+            label_text, bg_color, text_color = level_info
+            self.epoch_health_label.setStyleSheet(
+                f"background-color: {bg_color}; color: {text_color}; "
+                "font-weight: bold; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(f"{prefix}  [{health}] {label_text}")
+        elif health in ("Good", "Bad"):
+            bg = "#c8e6c9" if health == "Good" else "#ffcdd2"
+            fg = "#1b5e20" if health == "Good" else "#b71c1c"
+            self.epoch_health_label.setStyleSheet(
+                f"background-color: {bg}; color: {fg}; font-weight: bold; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(f"{prefix}  {health} (legacy)")
+        else:
+            self.epoch_health_label.setStyleSheet(
+                "background-color: #f5f5f5; color: #616161; font-size: 13px;"
+            )
+            self.epoch_health_label.setText(
+                f"{prefix}  — unlabelled  [1=Very Bad … 5=Very Good]"
+            )
+        self._update_epoch_timeline()
+
+    def _read_epoch_health(self, fif_path: Path, epoch_index: int) -> str:
+        csv_path = fif_path.parent / EPOCH_HEALTH_FILENAME
+        if not csv_path.exists():
+            return ""
+        subject_id = fif_path.parent.parent.name
+        session_id = fif_path.parent.name
+        try:
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if (
+                        row.get("subject_id") == subject_id
+                        and row.get("session_id") == session_id
+                        and row.get("epoch_index") == str(epoch_index)
+                    ):
+                        return row.get("health", "")
+        except Exception:
+            pass
+        return ""
+
+    def _log_epoch_health_if_allowed(self, health: str) -> None:
+        if self._shortcut_allowed() and self._epoch_health_mode:
+            self._log_epoch_health(health)
+
+    def _log_epoch_health(self, health: str) -> None:
+        loaded_fif, _ = self.time_series_viewer.last_loaded_paths()
+        if loaded_fif is None:
+            self._set_status("Load a recording before logging epoch health.")
+            return
+
+        current_time = self.time_series_viewer.current_cursor_time()
+        epoch_index = int(current_time // EPOCH_WINDOW_SECONDS)
+        epoch_start = epoch_index * EPOCH_WINDOW_SECONDS
+        epoch_end = epoch_start + EPOCH_WINDOW_SECONDS
+
+        subject_id = loaded_fif.parent.parent.name
+        session_id = loaded_fif.parent.name
+        csv_path = loaded_fif.parent / EPOCH_HEALTH_FILENAME
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        rows: list[dict] = []
+        if csv_path.exists():
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as f:
+                    rows = list(csv.DictReader(f))
+            except Exception:
+                rows = []
+
+        updated = False
+        for row in rows:
+            if (
+                row.get("subject_id") == subject_id
+                and row.get("session_id") == session_id
+                and row.get("epoch_index") == str(epoch_index)
+            ):
+                row["health"] = health
+                row["timestamp"] = timestamp
+                updated = True
+                break
+
+        if not updated:
+            rows.append({
+                "subject_id": subject_id,
+                "session_id": session_id,
+                "epoch_index": str(epoch_index),
+                "epoch_start_s": f"{epoch_start:.3f}",
+                "epoch_end_s": f"{epoch_end:.3f}",
+                "health": health,
+                "timestamp": timestamp,
+            })
+
+        rows.sort(key=lambda r: (
+            r.get("subject_id", ""),
+            r.get("session_id", ""),
+            int(r.get("epoch_index", 0)),
+        ))
+
+        fieldnames = [
+            "subject_id", "session_id", "epoch_index",
+            "epoch_start_s", "epoch_end_s", "health", "timestamp",
+        ]
+        try:
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as exc:
+            self._set_status(f"Failed to save epoch health: {exc}")
+            return
+
+        self._update_epoch_health_label()
+        self._set_status(
+            f"Epoch {epoch_index} ({epoch_start:.0f}s–{epoch_end:.0f}s) marked as {health}."
+        )
+
+    def _update_epoch_timeline(self) -> None:
+        if not self._epoch_health_mode:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        loaded_fif, _ = self.time_series_viewer.last_loaded_paths()
+        if loaded_fif is None:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        duration = self.time_series_viewer.signal_duration_seconds()
+        if duration is None or duration <= 0:
+            self.epoch_timeline_widget.setVisible(False)
+            return
+        total = math.ceil(duration / EPOCH_WINDOW_SECONDS)
+        current_time = self.time_series_viewer.current_cursor_time()
+        current_epoch = int(current_time // EPOCH_WINDOW_SECONDS)
+        subject_id = loaded_fif.parent.parent.name
+        session_id = loaded_fif.parent.name
+        csv_path = loaded_fif.parent / EPOCH_HEALTH_FILENAME
+        states: list[str] = [""] * total
+        if csv_path.exists():
+            try:
+                with csv_path.open(newline="", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        if (
+                            row.get("subject_id") == subject_id
+                            and row.get("session_id") == session_id
+                        ):
+                            try:
+                                i = int(row.get("epoch_index", -1))
+                            except (ValueError, TypeError):
+                                continue
+                            if 0 <= i < total:
+                                states[i] = row.get("health", "")
+            except Exception:
+                pass
+        self.epoch_timeline_widget.set_data(total, states, current_epoch)
+        self.epoch_timeline_widget.setVisible(True)
+
+    def _on_epoch_timeline_clicked(self, epoch_index: int) -> None:
+        self._goto_epoch(epoch_index)
+
+    # ── Statistics tab ────────────────────────────────────────────────────────
+
+    def _build_statistics_tab(self) -> QWidget:
+        try:
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+            from matplotlib.figure import Figure
+        except ImportError:
+            tab = QWidget()
+            layout = QVBoxLayout()
+            layout.addWidget(QLabel("matplotlib is required for the Statistics tab."))
+            tab.setLayout(layout)
+            return tab
+
+        tab = QWidget()
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
+
+        refresh_btn = QPushButton("Refresh Statistics")
+        refresh_btn.clicked.connect(self._refresh_statistics_tab)
+        outer_layout.addWidget(refresh_btn)
+
+        self._stats_overall_fig = Figure(figsize=(6, 3.5), tight_layout=True)
+        self._stats_overall_canvas = FigureCanvasQTAgg(self._stats_overall_fig)
+        self._stats_overall_canvas.setMinimumHeight(260)
+
+        self._stats_subject_fig = Figure(figsize=(6, 4), tight_layout=True)
+        self._stats_subject_canvas = FigureCanvasQTAgg(self._stats_subject_fig)
+        self._stats_subject_canvas.setMinimumHeight(320)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner_layout = QVBoxLayout()
+        inner_layout.setContentsMargins(4, 4, 4, 4)
+        inner_layout.setSpacing(4)
+        inner_layout.addWidget(QLabel("Overall Status Distribution"))
+        inner_layout.addWidget(self._stats_overall_canvas)
+        inner_layout.addWidget(QLabel("Status by Subject"))
+        inner_layout.addWidget(self._stats_subject_canvas)
+        inner_layout.addStretch()
+        inner.setLayout(inner_layout)
+        scroll.setWidget(inner)
+        outer_layout.addWidget(scroll)
+        tab.setLayout(outer_layout)
+        return tab
+
+    def _refresh_statistics_tab(self) -> None:
+        if not hasattr(self, "_stats_overall_fig"):
+            return
+        status_counts: dict[str, int] = {s: 0 for s in _GUI_STATUSES}
+        subject_counts: dict[str, dict[str, int]] = {}
+        for subject, counts in self.summary_subject_counts.items():
+            subject_counts[subject] = {s: counts.get(s, 0) for s in _GUI_STATUSES}
+            for status in _GUI_STATUSES:
+                status_counts[status] += counts.get(status, 0)
+        self._draw_overall_pie(status_counts)
+        self._draw_subject_bars(subject_counts)
+
+    def _draw_overall_pie(self, status_counts: dict[str, int]) -> None:
+        fig = self._stats_overall_fig
+        fig.clear()
+        ax = fig.add_subplot(111)
+        total = sum(status_counts.values())
+        labels = [s for s in _GUI_STATUSES if status_counts.get(s, 0) > 0]
+        sizes = [status_counts[s] for s in labels]
+        colors = [_GUI_STATUS_COLORS[s] for s in labels]
+        if total == 0:
+            ax.text(0.5, 0.5, "No recordings", ha="center", va="center", transform=ax.transAxes)
+        else:
+            def _fmt(pct: float) -> str:
+                n = int(round(pct * total / 100))
+                return f"{pct:.0f}%\n({n})"
+            ax.pie(sizes, labels=labels, colors=colors, autopct=_fmt, startangle=90)
+        ax.set_title(f"Overall Status  (n={total})")
+        fig.tight_layout()
+        self._stats_overall_canvas.draw()
+
+    def _draw_subject_bars(self, subject_counts: dict[str, dict[str, int]]) -> None:
+        fig = self._stats_subject_fig
+        fig.clear()
+        if not subject_counts:
+            self._stats_subject_canvas.draw()
+            return
+        subjects = sorted(
+            subject_counts.keys(),
+            key=lambda x: (x == "Unknown", subject_label_sort_key(x)),
+        )
+        n = len(subjects)
+        canvas_height = max(320, n * 28 + 80)
+        self._stats_subject_canvas.setMinimumHeight(canvas_height)
+        ax = fig.add_subplot(111)
+        bottoms = [0.0] * n
+        for status in _GUI_STATUSES:
+            vals = [float(subject_counts[s].get(status, 0)) for s in subjects]
+            if any(v > 0 for v in vals):
+                ax.barh(
+                    subjects, vals, left=bottoms,
+                    label=status, color=_GUI_STATUS_COLORS[status],
+                )
+                bottoms = [b + v for b, v in zip(bottoms, vals)]
+        ax.set_xlabel("Videos")
+        ax.set_title("Status by Subject")
+        ax.legend(loc="lower right", fontsize=8)
+        fig.tight_layout()
+        self._stats_subject_canvas.draw()
 
 
 def run_app() -> None:
